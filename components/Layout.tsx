@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react';
 import SuvaiLogo from '../suvai.jpeg';
-import { ViewState, UserRole } from '../types';
+import { ViewState, UserRole, City, Branch } from '../types';
 import {
     LayoutDashboard,
     Receipt,
@@ -13,9 +13,11 @@ import {
     X,
     History,
     PanelLeftClose,
-    PanelLeftOpen
+    PanelLeftOpen,
+    MapPin
 } from 'lucide-react';
 import { Tag } from 'lucide-react';
+import { ROLE_INITIALS, ROLE_LABELS, canAccessBilling, canEditCategories, canManageLocations, canManageUsers, canSwitchLocation } from '../utils/access';
 
 interface LayoutProps {
     currentView: ViewState;
@@ -25,6 +27,12 @@ interface LayoutProps {
     notifications: { id: string, message: string }[];
     userRole: UserRole;
     fillViewport?: boolean;
+    locationLabel?: string;
+    cities?: City[];
+    branches?: Branch[];
+    selectedCityId?: string | null;
+    selectedBranchId?: string | null;
+    onChangeLocation?: () => void;
 }
 
 const Layout: React.FC<LayoutProps> = ({
@@ -34,7 +42,9 @@ const Layout: React.FC<LayoutProps> = ({
     children,
     notifications,
     userRole,
-    fillViewport = false
+    fillViewport = false,
+    locationLabel,
+    onChangeLocation,
 }) => {
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
     const [showNotifications, setShowNotifications] = useState(false);
@@ -87,14 +97,19 @@ const Layout: React.FC<LayoutProps> = ({
 
     const navItems = [
         { view: ViewState.DASHBOARD, icon: LayoutDashboard, label: 'Dashboard' },
-        { view: ViewState.BILLING, icon: Receipt, label: 'Billing' },
+        ...(canAccessBilling(userRole)
+            ? [{ view: ViewState.BILLING, icon: Receipt, label: 'Billing' as const }]
+            : []),
         { view: ViewState.BILLS, icon: History, label: 'Bills History' },
         { view: ViewState.INVENTORY, icon: Package, label: 'Inventory' },
-        ...(userRole === UserRole.ADMIN
+        ...(canEditCategories(userRole)
             ? [{ view: ViewState.CATEGORIES, icon: Tag, label: 'Categories' as const }]
             : []),
         { view: ViewState.CUSTOMERS, icon: Users, label: 'Customers' },
-        ...(userRole === UserRole.ADMIN
+        ...(canManageLocations(userRole)
+            ? [{ view: ViewState.LOCATIONS, icon: MapPin, label: 'Locations' as const }]
+            : []),
+        ...(canManageUsers(userRole)
             ? [{ view: ViewState.USERS, icon: UserPlus, label: 'Users' as const }]
             : []),
     ];
@@ -171,6 +186,7 @@ const Layout: React.FC<LayoutProps> = ({
         : currentView === ViewState.CATEGORIES ? 'Categories'
         : currentView === ViewState.CUSTOMERS ? 'Customers'
         : currentView === ViewState.USERS ? 'Users'
+        : currentView === ViewState.LOCATIONS ? 'Locations'
         : 'Suvai';
 
     return (
@@ -188,7 +204,7 @@ const Layout: React.FC<LayoutProps> = ({
                             <div className="min-w-0">
                                 <h1 className="font-bold text-lg text-[var(--brand-text-light)] tracking-tight">Suvai</h1>
                                 <p className="text-xs text-[var(--brand-accent)] font-medium truncate">
-                                    {userRole === UserRole.ADMIN ? 'Admin Dashboard' : 'Employee Dashboard'}
+                                    {ROLE_LABELS[userRole]}
                                 </p>
                             </div>
                         )}
@@ -242,7 +258,7 @@ const Layout: React.FC<LayoutProps> = ({
                         <div className="min-w-0">
                             <h1 className="font-bold text-lg text-[var(--brand-text-light)] tracking-tight">Suvai</h1>
                             <p className="text-xs text-[var(--brand-accent)] font-medium truncate">
-                                {userRole === UserRole.ADMIN ? 'Admin' : 'Employee'}
+                                {ROLE_LABELS[userRole]}
                             </p>
                         </div>
                     </div>
@@ -312,6 +328,18 @@ const Layout: React.FC<LayoutProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2 sm:gap-4 shrink-0">
+                        {locationLabel && (
+                            <button
+                                type="button"
+                                onClick={onChangeLocation}
+                                disabled={!onChangeLocation}
+                                className="inline-flex items-center gap-1.5 max-w-[9rem] sm:max-w-[14rem] px-2.5 sm:px-3 py-1.5 rounded-full border border-[var(--brand-border)] bg-[var(--brand-muted)] text-xs font-medium text-[var(--brand-dark)] disabled:cursor-default"
+                                title={canSwitchLocation(userRole) ? 'Switch city or branch' : locationLabel}
+                            >
+                                <MapPin size={14} />
+                                <span className="truncate">{locationLabel}</span>
+                            </button>
+                        )}
                         <div className="relative">
                             <button
                                 type="button"
@@ -346,7 +374,7 @@ const Layout: React.FC<LayoutProps> = ({
                             )}
                         </div>
                         <div className="h-8 w-8 bg-[var(--brand-accent)] rounded-full flex items-center justify-center text-[var(--brand-dark)] font-bold text-sm border border-[var(--brand-border)]">
-                            {userRole === UserRole.EMPLOYEE ? 'E' : 'A'}
+                            {ROLE_INITIALS[userRole]}
                         </div>
                     </div>
                 </header>

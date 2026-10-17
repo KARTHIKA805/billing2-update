@@ -107,6 +107,8 @@ body {
   .thermal-receipt-print.thermal-receipt-print--active,
   .thermal-receipt-print.thermal-receipt-print--active * {
     visibility: visible !important;
+    font-weight: 700 !important;
+    -webkit-text-stroke: 0.15px #000;
   }
 
   .thermal-receipt-print.thermal-receipt-print--active {
@@ -119,6 +121,7 @@ body {
     padding: 2mm 4mm !important;
     box-sizing: border-box !important;
     font-family: 'Courier New', Courier, monospace !important;
+    font-weight: 700 !important;
     color: #000 !important;
     background: white !important;
     text-align: left !important;
@@ -154,9 +157,15 @@ body {
   padding: 12px;
   box-sizing: border-box;
   font-family: 'Courier New', Courier, monospace;
+  font-weight: 700;
   color: #000;
   background: #fff;
   border: 1px solid #e5e5e5;
+}
+
+.thermal-receipt-print,
+.thermal-receipt-print * {
+  font-weight: 700 !important;
 }
 
 .thermal-receipt-print__header {

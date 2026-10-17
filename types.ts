@@ -7,11 +7,14 @@ export enum ViewState {
   INVENTORY = 'INVENTORY',
   CUSTOMERS = 'CUSTOMERS',
   USERS = 'USERS',
+  LOCATIONS = 'LOCATIONS',
 }
 
 export enum UserRole {
-  ADMIN = 'admin',
   EMPLOYEE = 'employee',
+  BRANCH_ADMIN = 'branch_admin',
+  CITY_MANAGER = 'city_manager',
+  SUPER_ADMIN = 'super_admin',
 }
 
 export interface Product {
@@ -55,17 +58,47 @@ export interface InventoryAdjustment {
   id: string;
   productId?: string;
   ingredientId?: string;
+  branchId?: string;
   adjustment: number;
   reason: string;
   createdBy: string;
   createdAt: Date;
 }
 
+export interface City {
+  id: string;
+  name: string;
+}
+
+export interface Branch {
+  id: string;
+  cityId: string;
+  name: string;
+  address: string;
+  phone: string;
+}
+
 export interface AppUser {
   id: string;
   email: string;
   role: UserRole;
+  cityId?: string | null;
+  branchId?: string | null;
   createdAt: Date;
+}
+
+export interface SessionProfile {
+  id?: string;
+  email?: string;
+  role: UserRole;
+  cityId: string | null;
+  branchId: string | null;
+}
+
+export interface ShopIdentity {
+  name: string;
+  address: string;
+  phone: string;
 }
 
 export interface CartItem extends Product {
@@ -78,6 +111,7 @@ export type PaymentMethod = 'CASH' | 'UPI' | 'SPLIT' | 'OTHER';
 export interface SaleRecord {
   id: string;
   timestamp: Date;
+  branchId?: string;
   items: CartItem[];
   subtotal?: number;
   taxAmount?: number;

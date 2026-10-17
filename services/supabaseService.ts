@@ -1,37 +1,177 @@
 import { createClient } from '@supabase/supabase-js';
 import { supabase, supabaseUrl, supabaseAnonKey } from './supabaseClient';
 export { supabase };
-import { Product, SaleRecord, Customer, CartItem, Category, Ingredient, InventoryAdjustment, UserRole } from '../types';
-import { getCartLineId } from '../constants';
+import { Product, SaleRecord, Customer, CartItem, Category, Ingredient, InventoryAdjustment, UserRole, City, Branch, SessionProfile } from '../types';
+import { DEMO_BRANCHES, DEMO_CITIES, getCartLineId } from '../constants';
+import { normalizeUserRole } from '../utils/access';
+import { isUuid, resolveBranchId, resolveCityId } from '../utils/locations';
 
 const parseUnitFromProductName = (productName: string, fallback = 'unit') => {
     const match = productName.match(/\(([^)]+)\)\s*$/);
     return match ? match[1] : fallback;
 };
 
-const adjustStockForItems = async (items: CartItem[], direction: 'deduct' | 'restore') => {
-    if (!supabase) throw new Error('No DB');
+let branchInventorySupported: boolean | null = null;
 
+const disableBranchInventory = () => {
+    branchInventorySupported = false;
+};
+
+const canUseBranchInventory = () => branchInventorySupported !== false;
+
+const groupItemQuantities = (items: CartItem[]) => {
     const qtyByProduct = new Map<string, number>();
     for (const item of items) {
         if (!item.id?.trim()) continue;
         qtyByProduct.set(item.id, (qtyByProduct.get(item.id) || 0) + item.quantity);
     }
-    if (qtyByProduct.size === 0) return;
+    return qtyByProduct;
+};
 
+const upsertBranchStock = async (branchId: string, productId: string, stock: number, minStock?: number) => {
+    if (!supabase || !canUseBranchInventory() || !isUuid(branchId)) return false;
+    const payload: Record<string, unknown> = {
+        branch_id: branchId,
+        product_id: productId,
+        stock: Math.max(0, stock),
+        updated_at: new Date().toISOString(),
+    };
+    if (minStock !== undefined) payload.min_stock = Math.max(0, minStock);
+    const { error } = await supabase.from('branch_inventory').upsert(payload, { onConflict: 'branch_id,product_id' });
+    if (error) {
+        if (isMissingRelationError(error)) {
+            disableBranchInventory();
+            return false;
+        }
+        throw error;
+    }
+    branchInventorySupported = true;
+    return true;
+};
+
+const getBranchInventoryMap = async (branchId: string) => {
+    if (!supabase || !canUseBranchInventory() || !isUuid(branchId)) return null;
+    const { data, error } = await supabase
+        .from('branch_inventory')
+        .select('product_id, stock, min_stock')
+        .eq('branch_id', branchId);
+    if (error) {
+        if (isMissingRelationError(error)) {
+            disableBranchInventory();
+            return null;
+        }
+        throw error;
+    }
+    branchInventorySupported = true;
+    return new Map((data || []).map((row: any) => [row.product_id, {
+        stock: Number(row.stock),
+        minStock: Number(row.min_stock),
+    }]));
+};
+
+const applyBranchStockDelta = async (branchId: string, productId: string, delta: number) => {
+    if (!supabase) return false;
+    const { data: row, error } = await supabase
+        .from('branch_inventory')
+        .select('stock, min_stock')
+        .eq('branch_id', branchId)
+        .eq('product_id', productId)
+        .maybeSingle();
+    if (error) {
+        if (isMissingRelationError(error)) {
+            disableBranchInventory();
+            return false;
+        }
+        throw error;
+    }
+    if (row) {
+        return upsertBranchStock(branchId, productId, Number(row.stock) + delta, Number(row.min_stock));
+    }
+    const { data: product } = await supabase.from('products').select('stock, min_stock').eq('id', productId).maybeSingle();
+    return upsertBranchStock(
+        branchId,
+        productId,
+        Number(product?.stock ?? 0) + delta,
+        Number(product?.min_stock ?? 0)
+    );
+};
+
+const adjustCatalogStockForItems = async (items: CartItem[], direction: 'deduct' | 'restore') => {
+    if (!supabase) throw new Error('No DB');
+    const qtyByProduct = groupItemQuantities(items);
+    if (qtyByProduct.size === 0) return;
     const productIds = Array.from(qtyByProduct.keys());
     const { data: products, error } = await supabase
         .from('products')
         .select('id, stock')
         .in('id', productIds);
     if (error) throw error;
-
     await Promise.all((products || []).map((product) => {
         const qty = qtyByProduct.get(product.id) || 0;
         const delta = direction === 'deduct' ? -qty : qty;
-        const updatedStock = Math.max(0, Number(product.stock) + delta);
-        return supabase.from('products').update({ stock: updatedStock }).eq('id', product.id);
+        return supabase.from('products').update({ stock: Math.max(0, Number(product.stock) + delta) }).eq('id', product.id);
     }));
+};
+
+const adjustStockForItems = async (items: CartItem[], direction: 'deduct' | 'restore', branchId?: string | null) => {
+    if (!supabase) throw new Error('No DB');
+    const qtyByProduct = groupItemQuantities(items);
+    if (qtyByProduct.size === 0) return;
+
+    const resolvedBranchId = resolveBranchId(branchId);
+    if (resolvedBranchId && canUseBranchInventory()) {
+        try {
+            await Promise.all(Array.from(qtyByProduct.entries()).map(([productId, qty]) => (
+                applyBranchStockDelta(resolvedBranchId, productId, direction === 'deduct' ? -qty : qty)
+            )));
+            if (canUseBranchInventory()) return;
+        } catch (error) {
+            if (!isMissingRelationError(error)) throw error;
+            disableBranchInventory();
+        }
+    }
+
+    await adjustCatalogStockForItems(items, direction);
+};
+
+export const seedBranchInventoryForBranch = async (branchId: string, copyCatalog = false) => {
+    if (!supabase || !isUuid(branchId) || !canUseBranchInventory()) return;
+    const { data: products, error } = await supabase.from('products').select('id, stock, min_stock');
+    if (error) {
+        if (isMissingRelationError(error)) return;
+        throw error;
+    }
+    if (!products?.length) return;
+    const rows = products.map((product) => ({
+        branch_id: branchId,
+        product_id: product.id,
+        stock: copyCatalog ? Number(product.stock) : 0,
+        min_stock: Number(product.min_stock) || 0,
+        updated_at: new Date().toISOString(),
+    }));
+    const { error: upsertError } = await supabase.from('branch_inventory').upsert(rows, { onConflict: 'branch_id,product_id' });
+    if (upsertError) {
+        if (isMissingRelationError(upsertError)) disableBranchInventory();
+        else throw upsertError;
+    }
+};
+
+const seedProductInventoryAcrossBranches = async (productId: string, stock: number, minStock: number, currentBranchId?: string | null) => {
+    if (!supabase || !canUseBranchInventory()) return;
+    const { data: branches, error } = await supabase.from('branches').select('id');
+    if (error || !branches?.length) {
+        if (error && isMissingRelationError(error)) disableBranchInventory();
+        return;
+    }
+    const resolvedBranchId = resolveBranchId(currentBranchId);
+    await Promise.all(branches.map((branch) => (
+        upsertBranchStock(
+            branch.id,
+            productId,
+            resolvedBranchId && branch.id !== resolvedBranchId ? 0 : stock,
+            minStock
+        )
+    )));
 };
 
 const updateCustomerAfterSale = async (sale: SaleRecord) => {
@@ -65,51 +205,184 @@ export const getUser = async () => {
     return await supabase.auth.getUser();
 };
 
+const mapCity = (city: any): City => ({
+    id: city.id,
+    name: city.name,
+});
+
+const mapBranch = (branch: any): Branch => ({
+    id: branch.id,
+    cityId: branch.city_id,
+    name: branch.name,
+    address: branch.address || '',
+    phone: branch.phone || '',
+});
+
+const isMissingRelationError = (error: any) => {
+    const message = String(error?.message || error?.details || '').toLowerCase();
+    const code = String(error?.code || '');
+    return (
+        code === '42P01' ||
+        code === '42703' ||
+        code === 'PGRST204' ||
+        message.includes('does not exist') ||
+        message.includes('could not find')
+    );
+};
+
 export const resolveUserRoleFromMetadata = (user: any): UserRole | null => {
     if (!user) return null;
     const metadataRole = user.user_metadata?.role ?? user.app_metadata?.role ?? user?.role;
     if (typeof metadataRole !== 'string') return null;
-    const normalizedRole = metadataRole.toLowerCase();
-    if (normalizedRole === UserRole.EMPLOYEE) return UserRole.EMPLOYEE;
-    if (normalizedRole === UserRole.ADMIN) return UserRole.ADMIN;
-    return null;
+    return normalizeUserRole(metadataRole);
 };
 
-export const getUserRole = async (user: any): Promise<UserRole> => {
-    if (!user) return UserRole.ADMIN;
+export const getSessionProfile = async (user: any): Promise<SessionProfile> => {
+    const metadataRole = resolveUserRoleFromMetadata(user) ?? UserRole.SUPER_ADMIN;
+    const fallback: SessionProfile = {
+        id: user?.id,
+        email: user?.email,
+        role: metadataRole,
+        cityId: user?.user_metadata?.city_id ?? user?.user_metadata?.cityId ?? null,
+        branchId: user?.user_metadata?.branch_id ?? user?.user_metadata?.branchId ?? null,
+    };
 
-    if (!supabase || !user.id) return UserRole.ADMIN;
+    if (!user) return { role: UserRole.SUPER_ADMIN, cityId: null, branchId: null };
+    if (!supabase || !user.id) return fallback;
 
-    // Always verify the user still has an active row in user_profiles.
-    // This is the single source of truth — if an admin deletes the employee
-    // from the panel (which removes the user_profiles row), access is denied
-    // even though the Supabase Auth account still exists.
     try {
         const { data: profile, error: profileError } = await supabase
             .from('user_profiles')
-            .select('role')
+            .select('id, email, role, city_id, branch_id')
             .eq('id', user.id)
             .maybeSingle();
 
         if (profileError) {
-            console.warn('Failed to verify user profile:', profileError);
-            // Fall through to metadata-based role resolution on DB errors
-        } else if (!profile) {
-            // User has been deleted from the admin panel — revoke the session
+            if (!isMissingRelationError(profileError)) {
+                console.warn('Failed to verify user profile:', profileError);
+            }
+            return fallback;
+        }
+
+        if (!profile) {
             await supabase.auth.signOut();
             throw new Error('Your account has been deactivated. Please contact an administrator.');
-        } else {
-            // Profile exists — use its role as the authoritative source
-            const normalizedRole = String(profile.role).toLowerCase();
-            return normalizedRole === UserRole.EMPLOYEE ? UserRole.EMPLOYEE : UserRole.ADMIN;
         }
-    } catch (err: any) {
-        // Re-throw our own access-denied errors so callers can display them
-        if (err?.message?.includes('deactivated')) throw err;
-        console.warn('Failed to resolve role from user profile:', err);
-    }
 
-    return resolveUserRoleFromMetadata(user) ?? UserRole.ADMIN;
+        return {
+            id: profile.id,
+            email: profile.email,
+            role: normalizeUserRole(profile.role),
+            cityId: profile.city_id ?? null,
+            branchId: profile.branch_id ?? null,
+        };
+    } catch (err: any) {
+        if (err?.message?.includes('deactivated')) throw err;
+        console.warn('Failed to resolve user profile:', err);
+        return fallback;
+    }
+};
+
+export const getUserRole = async (user: any): Promise<UserRole> => {
+    const profile = await getSessionProfile(user);
+    return profile.role;
+};
+
+export const getCities = async (): Promise<City[]> => {
+    if (!supabase) return DEMO_CITIES;
+    const { data, error } = await supabase.from('cities').select('*').order('name');
+    if (error) {
+        if (!isMissingRelationError(error)) console.warn('Failed to load cities:', error);
+        return DEMO_CITIES;
+    }
+    return (data || []).map(mapCity);
+};
+
+export const getBranches = async (): Promise<Branch[]> => {
+    if (!supabase) return DEMO_BRANCHES;
+    const { data, error } = await supabase.from('branches').select('*').order('name');
+    if (error) {
+        if (!isMissingRelationError(error)) console.warn('Failed to load branches:', error);
+        return DEMO_BRANCHES;
+    }
+    return (data || []).map(mapBranch);
+};
+
+export const addCity = async (name: string): Promise<City> => {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error('City name is required.');
+    if (!supabase) return { id: crypto.randomUUID(), name: trimmed };
+    const { data, error } = await supabase.from('cities').insert({ name: trimmed }).select().single();
+    if (error) throw error;
+    return mapCity(data);
+};
+
+export const updateCity = async (id: string, name: string): Promise<City> => {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error('City name is required.');
+    if (!supabase) return { id, name: trimmed };
+    const { data, error } = await supabase.from('cities').update({ name: trimmed }).eq('id', id).select().single();
+    if (error) throw error;
+    return mapCity(data);
+};
+
+export const deleteCity = async (id: string) => {
+    if (!supabase) return;
+    const { error: branchError } = await supabase.from('branches').delete().eq('city_id', id);
+    if (branchError) throw branchError;
+    const { error } = await supabase.from('cities').delete().eq('id', id);
+    if (error) throw error;
+};
+
+export const addBranch = async (payload: { cityId: string; name: string; address?: string; phone?: string }): Promise<Branch> => {
+    const name = payload.name.trim();
+    if (!payload.cityId) throw new Error('Select a city first.');
+    if (!name) throw new Error('Branch name is required.');
+    if (!supabase) {
+        return {
+            id: crypto.randomUUID(),
+            cityId: payload.cityId,
+            name,
+            address: payload.address?.trim() || '',
+            phone: payload.phone?.trim() || '',
+        };
+    }
+    const { data, error } = await supabase.from('branches').insert({
+        city_id: payload.cityId,
+        name,
+        address: payload.address?.trim() || null,
+        phone: payload.phone?.trim() || null,
+    }).select().single();
+    if (error) throw error;
+    const created = mapBranch(data);
+    try {
+        await seedBranchInventoryForBranch(created.id, false);
+    } catch (seedError) {
+        if (!isMissingRelationError(seedError)) {
+            console.warn('Failed to seed branch inventory:', seedError);
+        }
+    }
+    return created;
+};
+
+export const updateBranch = async (branch: Branch): Promise<Branch> => {
+    const name = branch.name.trim();
+    if (!name) throw new Error('Branch name is required.');
+    if (!supabase) return { ...branch, name };
+    const { data, error } = await supabase.from('branches').update({
+        city_id: branch.cityId,
+        name,
+        address: branch.address?.trim() || null,
+        phone: branch.phone?.trim() || null,
+    }).eq('id', branch.id).select().single();
+    if (error) throw error;
+    return mapBranch(data);
+};
+
+export const deleteBranch = async (id: string) => {
+    if (!supabase) return;
+    const { error } = await supabase.from('branches').delete().eq('id', id);
+    if (error) throw error;
 };
 
 // --- Data Services ---
@@ -155,8 +428,7 @@ const mapIngredient = (i: any): Ingredient => ({
     deletedAt: i.deleted_at ? new Date(i.deleted_at) : undefined
 });
 
-// Products
-export const getProducts = async (): Promise<Product[]> => {
+const fetchCatalogProducts = async (): Promise<Product[]> => {
     if (!supabase) return [];
 
     if (canUseSoftDelete()) {
@@ -177,6 +449,28 @@ export const getProducts = async (): Promise<Product[]> => {
     return (data || []).map(mapProduct);
 };
 
+export const getProducts = async (branchId?: string | null): Promise<Product[]> => {
+    const products = await fetchCatalogProducts();
+    const resolvedBranchId = resolveBranchId(branchId);
+    if (!resolvedBranchId || !canUseBranchInventory()) return products;
+
+    try {
+        const overlay = await getBranchInventoryMap(resolvedBranchId);
+        if (!overlay) return products;
+        return products.map((product) => {
+            const row = overlay.get(product.id);
+            if (!row) return { ...product, stock: 0 };
+            return { ...product, stock: row.stock, minStock: row.minStock };
+        });
+    } catch (error) {
+        if (isMissingRelationError(error)) {
+            disableBranchInventory();
+            return products;
+        }
+        throw error;
+    }
+};
+
 export const getDeletedProducts = async (): Promise<Product[]> => {
     if (!supabase || !canUseSoftDelete()) return [];
     const { data, error } = await supabase
@@ -194,7 +488,7 @@ export const getDeletedProducts = async (): Promise<Product[]> => {
     return (data || []).map(mapProduct);
 };
 
-export const addProduct = async (product: Omit<Product, 'id'>) => {
+export const addProduct = async (product: Omit<Product, 'id'>, branchId?: string | null) => {
     if (!supabase) throw new Error('No DB');
     const dbPayload = {
         name: product.name,
@@ -207,22 +501,40 @@ export const addProduct = async (product: Omit<Product, 'id'>) => {
     };
     const { data, error } = await supabase.from('products').insert(dbPayload).select().single();
     if (error) throw error;
+    if (data?.id) {
+        try {
+            await seedProductInventoryAcrossBranches(data.id, product.stock, product.minStock, branchId);
+        } catch (seedError) {
+            if (!isMissingRelationError(seedError)) throw seedError;
+            disableBranchInventory();
+        }
+    }
     return data;
 };
 
-export const updateProduct = async (product: Product) => {
+export const updateProduct = async (product: Product, branchId?: string | null) => {
     if (!supabase) throw new Error('No DB');
-    const dbPayload = {
+    const resolvedBranchId = resolveBranchId(branchId);
+    const dbPayload: Record<string, unknown> = {
         name: product.name,
         category: product.category,
         price: product.price,
         cost: product.cost,
-        stock: product.stock,
         min_stock: product.minStock,
         unit: product.unit
     };
+    if (!resolvedBranchId || !canUseBranchInventory()) {
+        dbPayload.stock = product.stock;
+    }
     const { error } = await supabase.from('products').update(dbPayload).eq('id', product.id);
     if (error) throw error;
+
+    if (resolvedBranchId && canUseBranchInventory()) {
+        const updated = await upsertBranchStock(resolvedBranchId, product.id, product.stock, product.minStock);
+        if (!updated) {
+            await supabase.from('products').update({ stock: product.stock }).eq('id', product.id);
+        }
+    }
 };
 
 const clearProductDeleteBlockers = async (productId: string) => {
@@ -445,6 +757,7 @@ export const getInventoryAdjustments = async (): Promise<InventoryAdjustment[]> 
         id: adj.id,
         productId: adj.product_id,
         ingredientId: adj.ingredient_id,
+        branchId: adj.branch_id || undefined,
         adjustment: Number(adj.adjustment),
         reason: adj.reason,
         createdBy: adj.created_by,
@@ -529,25 +842,76 @@ export const restoreIngredient = async (id: string) => {
     }
 };
 
-export const adjustProductStock = async (productId: string, adjustment: number, reason: string, createdBy: string = 'system') => {
+const insertInventoryAdjustment = async (payload: Record<string, unknown>) => {
     if (!supabase) throw new Error('No DB');
+    let { error } = await supabase.from('inventory_adjustments').insert(payload);
+    if (error && payload.branch_id && isMissingRelationError(error)) {
+        const retryPayload = { ...payload };
+        delete retryPayload.branch_id;
+        const retry = await supabase.from('inventory_adjustments').insert(retryPayload);
+        error = retry.error;
+    }
+    if (error) throw error;
+};
+
+export const adjustProductStock = async (
+    productId: string,
+    adjustment: number,
+    reason: string,
+    createdBy: string = 'system',
+    branchId?: string | null
+) => {
+    if (!supabase) throw new Error('No DB');
+    const resolvedBranchId = resolveBranchId(branchId);
+
+    if (resolvedBranchId && canUseBranchInventory()) {
+        try {
+            const overlay = await getBranchInventoryMap(resolvedBranchId);
+            if (overlay) {
+                const current = overlay.get(productId)?.stock ?? 0;
+                const newStock = current + adjustment;
+                if (newStock < 0) throw new Error('Cannot reduce stock below zero.');
+                const updated = await upsertBranchStock(
+                    resolvedBranchId,
+                    productId,
+                    newStock,
+                    overlay.get(productId)?.minStock
+                );
+                if (updated) {
+                    await insertInventoryAdjustment({
+                        product_id: productId,
+                        ingredient_id: null,
+                        adjustment,
+                        reason,
+                        created_by: createdBy,
+                        branch_id: resolvedBranchId,
+                    });
+                    return;
+                }
+            }
+        } catch (error) {
+            if (!isMissingRelationError(error)) throw error;
+            disableBranchInventory();
+        }
+    }
+
     const { data: product, error: prodError } = await supabase.from('products').select('stock').eq('id', productId).single();
     if (prodError) throw prodError;
     if (!product) throw new Error('Product not found');
-    
+
     const newStock = Number(product.stock) + adjustment;
     if (newStock < 0) throw new Error('Cannot reduce stock below zero.');
 
     const { error: updateError } = await supabase.from('products').update({ stock: newStock }).eq('id', productId);
     if (updateError) throw updateError;
-    const { error: adjError } = await supabase.from('inventory_adjustments').insert({
+    await insertInventoryAdjustment({
         product_id: productId,
         ingredient_id: null,
         adjustment,
         reason,
-        created_by: createdBy
+        created_by: createdBy,
+        ...(resolvedBranchId ? { branch_id: resolvedBranchId } : {}),
     });
-    if (adjError) throw adjError;
 };
 
 export const adjustIngredientStock = async (ingredientId: string, adjustment: number, reason: string, createdBy: string = 'system') => {
@@ -618,11 +982,19 @@ export const createSale = async (sale: SaleRecord) => {
         salePayload.cash_paid = sale.cashPaid ?? 0;
         salePayload.upi_paid = sale.upiPaid ?? 0;
     }
+    const resolvedBranchId = resolveBranchId(sale.branchId);
+    if (!resolvedBranchId || !isUuid(resolvedBranchId)) {
+        throw new Error('Select a branch before creating a bill.');
+    }
+    salePayload.branch_id = resolvedBranchId;
 
     const { data: saleData, error: saleError } = await supabase.from('sales').insert(salePayload).select().single();
     if (saleError) {
         if (saleError.message?.includes('fetch')) {
             throw new Error('Network error: could not connect to the database. Check your internet connection.');
+        }
+        if (isMissingRelationError(saleError) || /invalid input syntax for type uuid|foreign key constraint/i.test(String(saleError.message || ''))) {
+            throw new Error('This bill needs a valid branch. Select an outlet and try again.');
         }
         throw saleError;
     }
@@ -648,7 +1020,7 @@ export const createSale = async (sale: SaleRecord) => {
     if (itemsError) throw itemsError;
 
     await Promise.all([
-        adjustStockForItems(sale.items, 'deduct'),
+        adjustStockForItems(sale.items, 'deduct', resolvedBranchId),
         updateCustomerAfterSale(sale),
     ]);
 
@@ -712,6 +1084,7 @@ export const getSales = async (productsForLookup?: Product[]): Promise<SaleRecor
     return (data || []).map((s: any) => ({
         id: s.id,
         timestamp: new Date(s.timestamp),
+        branchId: s.branch_id || undefined,
         subtotal: Number(s.subtotal),
         taxAmount: Number(s.tax_amount),
         roundingAdjustment: Number(s.rounding_adjustment),
@@ -768,7 +1141,10 @@ export const updateSale = async (sale: SaleRecord) => {
         cartLineId: getCartLineId(i.product_id, parseUnitFromProductName(i.product_name || '', 'unit'))
     }));
 
-    await adjustStockForItems(previousItems, 'restore');
+    const { data: existingSale } = await supabase.from('sales').select('branch_id').eq('id', sale.id).maybeSingle();
+    const stockBranchId = resolveBranchId(sale.branchId) ?? existingSale?.branch_id ?? null;
+
+    await adjustStockForItems(previousItems, 'restore', stockBranchId);
 
     const salePayload: Record<string, unknown> = {
         total: sale.total,
@@ -812,13 +1188,13 @@ export const updateSale = async (sale: SaleRecord) => {
     const { error: itemsError } = await supabase.from('sale_items').insert(itemsPayload);
     if (itemsError) throw itemsError;
 
-    await adjustStockForItems(sale.items, 'deduct');
+    await adjustStockForItems(sale.items, 'deduct', stockBranchId);
 };
 
 export const voidSale = async (sale: SaleRecord) => {
     if (!supabase) throw new Error('No DB');
 
-    await adjustStockForItems(sale.items, 'restore');
+    await adjustStockForItems(sale.items, 'restore', sale.branchId);
 
     if (sale.customerId) {
         const { data: cust } = await supabase.from('customers').select('total_spent, loyalty_points').eq('id', sale.customerId).single();
@@ -863,7 +1239,11 @@ export const getAdminUsers = async () => {
         return (rpcData || []).map((profile: any) => ({
             id: profile.id,
             email: profile.email,
-            user_metadata: { role: profile.role },
+            user_metadata: {
+                role: profile.role,
+                city_id: profile.city_id ?? null,
+                branch_id: profile.branch_id ?? null,
+            },
             created_at: profile.created_at,
             last_sign_in_at: profile.last_sign_in_at ?? null,
         }));
@@ -881,7 +1261,11 @@ export const getAdminUsers = async () => {
     return (data || []).map((profile: any) => ({
         id: profile.id,
         email: profile.email,
-        user_metadata: { role: profile.role },
+        user_metadata: {
+            role: profile.role,
+            city_id: profile.city_id ?? null,
+            branch_id: profile.branch_id ?? null,
+        },
         created_at: profile.created_at,
         last_sign_in_at: profile.last_sign_in_at ?? null,
     }));
@@ -904,13 +1288,15 @@ export const createAdminUser = async (email: string, password: string, userMetad
         },
     });
 
-    const role = userMetadata?.role === UserRole.ADMIN ? UserRole.ADMIN : UserRole.EMPLOYEE;
+    const role = normalizeUserRole(userMetadata?.role);
+    const cityId = resolveCityId(userMetadata?.cityId ?? userMetadata?.city_id ?? null);
+    const branchId = resolveBranchId(userMetadata?.branchId ?? userMetadata?.branch_id ?? null);
 
     const { data, error } = await isolated.auth.signUp({
         email,
         password,
         options: {
-            data: { ...(userMetadata || {}), role },
+            data: { ...(userMetadata || {}), role, city_id: cityId, branch_id: branchId },
         },
     });
 
@@ -920,6 +1306,8 @@ export const createAdminUser = async (email: string, password: string, userMetad
             id: data.user.id,
             email,
             role,
+            city_id: cityId,
+            branch_id: branchId,
         };
         await supabase.from('user_profiles').upsert(profilePayload);
     }

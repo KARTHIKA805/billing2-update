@@ -7,6 +7,7 @@ interface EmployeeDashboardProps {
   sales: SaleRecord[];
   products: Product[];
   dailyStats: DailyStat[];
+  locationLabel?: string;
 }
 
 const isToday = (date: Date) => {
@@ -33,7 +34,7 @@ const StatCard = ({ title, value, sub, icon: Icon, colorClass, bgClass }: any) =
   </div>
 );
 
-const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({ sales, products, dailyStats }) => {
+const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({ sales, products, dailyStats, locationLabel }) => {
   const todaySales = sales.filter(sale => isToday(sale.timestamp));
   const todayCount = todaySales.length;
   const todayRevenue = todaySales.reduce((sum, sale) => sum + sale.total, 0);
@@ -78,6 +79,12 @@ const EmployeeDashboard: React.FC<EmployeeDashboardProps> = ({ sales, products, 
 
   return (
     <div className="space-y-8 animate-fade-in">
+      {locationLabel && (
+        <div className="bg-white border border-slate-100 rounded-2xl px-5 py-4">
+          <p className="text-xs uppercase tracking-wide text-slate-500">Your branch</p>
+          <h2 className="text-lg font-semibold text-slate-800">{locationLabel}</h2>
+        </div>
+      )}
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <StatCard

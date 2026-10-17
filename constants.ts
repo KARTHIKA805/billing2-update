@@ -1,4 +1,5 @@
 import { Product, DailyStat, SaleRecord, Customer } from './types';
+import { SEEDED_BRANCH_IDS, SEEDED_CITY_IDS } from './utils/locations';
 
 export const BILLING_WEIGHT_OPTIONS = [
   '50 gms',
@@ -140,6 +141,35 @@ export const MOCK_CUSTOMERS: Customer[] = [
 export const SHOP_NAME = 'Suvai Bakery';
 export const SHOP_ADDRESS = 'Main Road, Your City, Tamil Nadu';
 export const SHOP_PHONE = '+91 98765 43210';
+
+export const DEMO_CITIES = [
+  { id: SEEDED_CITY_IDS.chennai, name: 'Chennai' },
+  { id: SEEDED_CITY_IDS.coimbatore, name: 'Coimbatore' },
+];
+
+export const DEMO_BRANCHES = [
+  {
+    id: SEEDED_BRANCH_IDS.tNagar,
+    cityId: SEEDED_CITY_IDS.chennai,
+    name: 'T. Nagar',
+    address: 'Usman Road, T. Nagar, Chennai, Tamil Nadu',
+    phone: '+91 98765 43210',
+  },
+  {
+    id: SEEDED_BRANCH_IDS.annaNagar,
+    cityId: SEEDED_CITY_IDS.chennai,
+    name: 'Anna Nagar',
+    address: '2nd Avenue, Anna Nagar, Chennai, Tamil Nadu',
+    phone: '+91 98765 43211',
+  },
+  {
+    id: SEEDED_BRANCH_IDS.rsPuram,
+    cityId: SEEDED_CITY_IDS.coimbatore,
+    name: 'RS Puram',
+    address: 'DB Road, RS Puram, Coimbatore, Tamil Nadu',
+    phone: '+91 98765 43212',
+  },
+];
 
 // Placeholder for Shop QR Code (UPI)
 export const SHOP_QR_CODE_URL = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi://pay?pa=bakery@upi&pn=SuvaiBakery&mc=5462&tid=123456&tr=123456&tn=BakeryPayment&am=0&cu=INR";

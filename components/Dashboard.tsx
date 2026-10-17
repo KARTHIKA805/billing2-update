@@ -6,13 +6,23 @@ import type { DateRange } from 'react-day-picker';
 import 'react-day-picker/dist/style.css';
 import { SaleRecord, Product, DailyStat } from '../types';
 
+interface BranchSummary {
+  id: string;
+  name: string;
+  cityName: string;
+  sales: number;
+  orders: number;
+}
+
 interface DashboardProps {
   sales: SaleRecord[];
   products: Product[];
   dailyStats: DailyStat[];
+  locationLabel?: string;
+  branchSummaries?: BranchSummary[];
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ sales, products, dailyStats }) => {
+const Dashboard: React.FC<DashboardProps> = ({ sales, products, dailyStats, locationLabel, branchSummaries = [] }) => {
   const [reportRange, setReportRange] = useState<'DATE' | 'WEEK' | 'MONTH' | 'YEAR'>('WEEK');
   const [reportText, setReportText] = useState('');
   const [selectedDate, setSelectedDate] = useState<string>(() => {
@@ -279,6 +289,26 @@ const Dashboard: React.FC<DashboardProps> = ({ sales, products, dailyStats }) =>
 
   return (
     <div className="space-y-8 animate-fade-in">
+      {locationLabel && (
+        <div className="bg-white border border-slate-100 rounded-2xl px-5 py-4">
+          <p className="text-xs uppercase tracking-wide text-slate-500">Location</p>
+          <h2 className="text-lg font-semibold text-slate-800">{locationLabel}</h2>
+        </div>
+      )}
+
+      {branchSummaries.length > 1 && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {branchSummaries.map((branch) => (
+            <div key={branch.id} className="bg-white border border-slate-100 rounded-2xl p-5">
+              <p className="text-xs uppercase tracking-wide text-slate-500">{branch.cityName}</p>
+              <h3 className="text-lg font-semibold text-slate-800 mt-1">{branch.name}</h3>
+              <p className="text-2xl font-bold text-slate-800 mt-3">₹{branch.sales.toFixed(2)}</p>
+              <p className="text-sm text-slate-500 mt-1">{branch.orders} orders</p>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <StatCard

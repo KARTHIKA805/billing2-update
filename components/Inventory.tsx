@@ -29,6 +29,8 @@ interface InventoryProps {
   onRestoreProduct: (id: string) => void;
   onRestoreIngredient: (id: string) => void;
   canEdit?: boolean;
+  stockLocationLabel?: string | null;
+  canEditProductStock?: boolean;
 }
 
 type ListMode = 'active' | 'deleted';
@@ -37,7 +39,7 @@ type SortField = 'name' | 'profit' | 'margin' | 'price';
 const ALLOWED_UNITS = ['pcs', 'kg', 'L'];
 const MENU_ITEM_UNITS = PRODUCT_UNIT_OPTIONS;
 
-const Inventory: React.FC<InventoryProps> = ({ products, categories, ingredients, inventoryAdjustments, onAddProduct, onAddCategory, onUpdateProduct, onDeleteProduct, onAddIngredient, onUpdateIngredient, onDeleteIngredient, onAdjustProductStock, onAdjustIngredientStock, onFetchDeletedItems, onRestoreProduct, onRestoreIngredient, canEdit = true }) => {
+const Inventory: React.FC<InventoryProps> = ({ products, categories, ingredients, inventoryAdjustments, onAddProduct, onAddCategory, onUpdateProduct, onDeleteProduct, onAddIngredient, onUpdateIngredient, onDeleteIngredient, onAdjustProductStock, onAdjustIngredientStock, onFetchDeletedItems, onRestoreProduct, onRestoreIngredient, canEdit = true, stockLocationLabel = null, canEditProductStock = true }) => {
   const [listMode, setListMode] = useState<ListMode>('active');
   const [deletedProducts, setDeletedProducts] = useState<Product[]>([]);
   const [deletedIngredients, setDeletedIngredients] = useState<Ingredient[]>([]);
@@ -274,6 +276,10 @@ const Inventory: React.FC<InventoryProps> = ({ products, categories, ingredients
     if (!amount || !adjustReason.trim()) return;
 
     if (selectedProductForAdjust) {
+      if (!canEditProductStock) {
+        alert('Select a branch before changing product stock.');
+        return;
+      }
       onAdjustProductStock(selectedProductForAdjust.id, amount, adjustReason.trim());
     }
     if (selectedIngredientForAdjust) {
@@ -304,7 +310,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, categories, ingredients
       category: formData.category.trim(),
       price: formData.price.trim() ? parseFloat(formData.price) : 0,
       cost: formData.cost.trim() ? parseFloat(formData.cost) : 0,
-      stock: editingId ? (formData.stock.trim() ? parseInt(formData.stock) || 0 : 0) : 0,
+      stock: formData.stock.trim() ? parseInt(formData.stock) || 0 : 0,
       minStock: formData.minStock.trim() ? parseInt(formData.minStock) || 0 : 0,
       unit: normalizeProductUnit(formData.unit || '100 gms')
     };
@@ -393,6 +399,13 @@ const Inventory: React.FC<InventoryProps> = ({ products, categories, ingredients
               ? 'Manage your product offerings and inventory levels.'
               : 'View and restore items that were removed from the menu.'}
           </p>
+          {listMode === 'active' && (
+            <p className={`mt-2 text-sm ${stockLocationLabel ? 'text-[var(--brand-dark)]' : 'text-amber-700'}`}>
+              {stockLocationLabel
+                ? `Stock shown is for ${stockLocationLabel}. The menu is shared across outlets.`
+                : 'Showing catalog stock. Select a branch to view or edit outlet stock.'}
+            </p>
+          )}
         </div>
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full md:w-auto">
           <div className="inline-flex rounded-xl border border-[var(--brand-border)] bg-white p-1">
@@ -483,6 +496,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, categories, ingredients
                 <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--brand-border)] uppercase tracking-wider">Cost</th>
                 <TableHeader field="profit" label="Profit / Unit" />
                 <TableHeader field="margin" label="Margin" />
+                <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--brand-border)] uppercase tracking-wider">Stock</th>
                 <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--brand-border)] uppercase tracking-wider">Status</th>
                 <th className="px-6 py-4 text-right text-xs font-semibold text-[var(--brand-border)] uppercase tracking-wider">Actions</th>
               </tr>
@@ -490,7 +504,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, categories, ingredients
             <tbody className="divide-y divide-slate-100">
               {filteredProducts.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-6 py-10 text-center text-[var(--brand-border)]">
+                  <td colSpan={8} className="px-6 py-10 text-center text-[var(--brand-border)]">
                     No products found for this category.
                   </td>
                 </tr>
@@ -516,6 +530,9 @@ const Inventory: React.FC<InventoryProps> = ({ products, categories, ingredients
                         {margin}%
                       </span>
                     </td>
+                    <td className="px-6 py-4 text-sm font-medium text-[var(--brand-dark)]">
+                      {product.stock} {product.unit}
+                    </td>
                     <td className="px-6 py-4">
                       {isLowStock ? (
                         <div className="flex items-center gap-1.5 text-[var(--brand-dark)] bg-[var(--brand-accent)]/20 px-2 py-1 rounded-full w-fit">
@@ -533,9 +550,15 @@ const Inventory: React.FC<InventoryProps> = ({ products, categories, ingredients
                       {canEdit ? (
                         <div className="flex items-center justify-end gap-2">
                           <button 
-                            onClick={() => openProductAdjustment(product)}
+                            onClick={() => {
+                              if (!canEditProductStock) {
+                                alert('Select a branch before changing product stock.');
+                                return;
+                              }
+                              openProductAdjustment(product);
+                            }}
                             className="p-2 text-[var(--brand-border)] hover:text-[var(--brand-dark)] hover:bg-[var(--brand-muted)] rounded-lg transition-colors"
-                            title="Adjust stock"
+                            title={canEditProductStock ? 'Adjust stock' : 'Select a branch to adjust stock'}
                           >
                             <Edit3 size={16} />
                           </button>
@@ -889,7 +912,20 @@ const Inventory: React.FC<InventoryProps> = ({ products, categories, ingredients
                   />
                 </div>
 
-                <div className="col-span-2">
+                <div className="col-span-1">
+                  <label className="block text-sm font-semibold text-[var(--brand-dark)] mb-1.5">
+                    {stockLocationLabel ? `Stock (${stockLocationLabel})` : 'Catalog stock'}
+                  </label>
+                  <input 
+                    type="number" 
+                    min="0"
+                    disabled={!canEditProductStock && Boolean(stockLocationLabel === null)}
+                    className="w-full px-4 py-3 rounded-xl border border-[var(--brand-border)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-accent)]/20 focus:border-[var(--brand-accent)] text-[var(--brand-text-dark)] bg-white disabled:opacity-60"
+                    value={formData.stock}
+                    onChange={e => setFormData({...formData, stock: e.target.value})}
+                  />
+                </div>
+                <div className="col-span-1">
                   <label className="block text-sm font-semibold text-[var(--brand-dark)] mb-1.5">Alert Level</label>
                   <input 
                     type="number" 

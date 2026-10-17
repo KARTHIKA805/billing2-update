@@ -1,6 +1,6 @@
 import { FC, useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { Product, CartItem, Customer, NewSalePayload, SaleRecord, PrintMode, PaymentMethod } from '../types';
+import { Product, CartItem, Customer, NewSalePayload, SaleRecord, PrintMode, PaymentMethod, ShopIdentity } from '../types';
 import { Search, Plus, Minus, CheckCircle, ShoppingBag, User, X, Award, Smartphone, Banknote, Printer, HelpCircle, PauseCircle, RotateCcw, Split } from 'lucide-react';
 import BillingHelpSheet from './BillingHelpSheet';
 import ReceiptPrintBlock from './ReceiptPrintBlock';
@@ -13,6 +13,7 @@ interface BillingProps {
   customers: Customer[];
   categories: import('../types').Category[];
   salesTodayTotal: number;
+  shop?: ShopIdentity;
   onCompleteSales: (sales: NewSalePayload[]) => Promise<SaleRecord[]>;
 }
 
@@ -31,7 +32,7 @@ interface BillGroup {
   redeemPoints: boolean;
 }
 
-const Billing: FC<BillingProps> = ({ products, customers, categories, salesTodayTotal, onCompleteSales }) => {
+const Billing: FC<BillingProps> = ({ products, customers, categories, salesTodayTotal, shop, onCompleteSales }) => {
   const [groups, setGroups] = useState<BillGroup[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -745,6 +746,7 @@ const Billing: FC<BillingProps> = ({ products, customers, categories, salesToday
                 active={activePrintSaleIds.includes(bill.sale.id)}
                 cashReceived={bill.cashReceived}
                 changeDue={bill.changeDue}
+                shop={shop}
               />
             ))}
           </div>,

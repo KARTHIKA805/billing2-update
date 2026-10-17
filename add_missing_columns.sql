@@ -89,12 +89,18 @@ alter table sales add column if not exists upi_paid numeric default 0;
 
 -- Track last sign in on user profiles (also synced from auth.users via get_admin_users)
 alter table user_profiles add column if not exists last_sign_in_at timestamp with time zone;
+alter table user_profiles add column if not exists city_id uuid;
+alter table user_profiles add column if not exists branch_id uuid;
+
+drop function if exists public.get_admin_users();
 
 create or replace function public.get_admin_users()
 returns table (
   id uuid,
   email text,
   role text,
+  city_id uuid,
+  branch_id uuid,
   created_at timestamptz,
   last_sign_in_at timestamptz
 )
@@ -106,6 +112,8 @@ as $$
     p.id,
     p.email,
     p.role,
+    p.city_id,
+    p.branch_id,
     p.created_at,
     coalesce(u.last_sign_in_at, p.last_sign_in_at) as last_sign_in_at
   from public.user_profiles p

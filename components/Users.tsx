@@ -1,13 +1,25 @@
 import React, { useState, useEffect } from 'react';
 import { Search, UserPlus, Trash2, Eye, EyeOff, X, AlertCircle, Check, Info, Shield, User } from 'lucide-react';
 import { getAdminUsers, createAdminUser, deleteAdminUser } from '../services/supabaseService';
+import { Branch, City, UserRole } from '../types';
+import { ROLE_LABELS, creatableRoles, normalizeUserRole, roleRequiresBranch, roleRequiresCity } from '../utils/access';
 
 interface AdminUser {
   id: string;
   email: string;
   role: string;
+  cityId?: string | null;
+  branchId?: string | null;
   created_at: string;
   last_sign_in_at?: string | null;
+}
+
+interface UsersProps {
+  actorRole: UserRole;
+  assignedCityId?: string | null;
+  assignedBranchId?: string | null;
+  cities: City[];
+  branches: Branch[];
 }
 
 const formatUserDateTime = (value?: string | null) => {
@@ -17,7 +29,13 @@ const formatUserDateTime = (value?: string | null) => {
   return date.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
 };
 
-const Users: React.FC = () => {
+const Users: React.FC<UsersProps> = ({
+  actorRole,
+  assignedCityId,
+  assignedBranchId,
+  cities,
+  branches,
+}) => {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -29,7 +47,14 @@ const Users: React.FC = () => {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
   // Form state
-  const [newUser, setNewUser] = useState({ email: '', password: '', role: 'employee' });
+  const allowedRoles = creatableRoles(actorRole);
+  const [newUser, setNewUser] = useState({
+    email: '',
+    password: '',
+    role: allowedRoles[0] || UserRole.EMPLOYEE,
+    cityId: assignedCityId || '',
+    branchId: assignedBranchId || '',
+  });
 
   // Load users on mount
   useEffect(() => {
@@ -45,6 +70,8 @@ const Users: React.FC = () => {
         id: user.id,
         email: user.email,
         role: user.user_metadata?.role || 'employee',
+        cityId: user.user_metadata?.city_id ?? null,
+        branchId: user.user_metadata?.branch_id ?? null,
         created_at: user.created_at,
         last_sign_in_at: user.last_sign_in_at ?? null,
       })));
@@ -73,15 +100,28 @@ const Users: React.FC = () => {
       return;
     }
 
+    const nextRole = normalizeUserRole(newUser.role);
+    const nextCityId = assignedCityId || newUser.cityId || null;
+    const nextBranchId = assignedBranchId || newUser.branchId || null;
+    if (roleRequiresCity(nextRole) && !nextCityId) {
+      setError('Select a city for this role.');
+      return;
+    }
+    if (roleRequiresBranch(nextRole) && !nextBranchId) {
+      setError('Select a branch for this role.');
+      return;
+    }
+
     setLoading(true);
     try {
-      const res: any = await createAdminUser(newUser.email, newUser.password, { role: newUser.role });
-      const createdUser = res?.user ?? res;
+      const res: any = await createAdminUser(newUser.email, newUser.password, {
+        role: nextRole,
+        cityId: nextCityId,
+        branchId: nextBranchId,
+      });
       const signInTest = res?.signInTest;
 
-      setSuccess(
-        `${newUser.role === 'admin' ? 'Admin' : 'Employee'} user ${newUser.email} created successfully.`
-      );
+      setSuccess(`${ROLE_LABELS[nextRole]} user ${newUser.email} created successfully.`);
 
       // If sign-in test failed due to email confirmation, surface a helpful warning (not an error)
       if (signInTest && signInTest.success === false) {
@@ -97,7 +137,13 @@ const Users: React.FC = () => {
         }
       }
 
-      setNewUser({ email: '', password: '', role: 'employee' });
+      setNewUser({
+        email: '',
+        password: '',
+        role: allowedRoles[0] || UserRole.EMPLOYEE,
+        cityId: assignedCityId || '',
+        branchId: assignedBranchId || '',
+      });
       setShowAddModal(false);
       await loadUsers();
     } catch (err: any) {
@@ -140,9 +186,24 @@ const Users: React.FC = () => {
   };
 
   // Filter users
-  const filteredUsers = users.filter(u =>
-    u.email.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const locationName = (cityId?: string | null, branchId?: string | null) => {
+    const city = cities.find((item) => item.id === cityId)?.name;
+    const branch = branches.find((item) => item.id === branchId)?.name;
+    if (city && branch) return `${city} · ${branch}`;
+    if (city) return city;
+    return 'All locations';
+  };
+
+  const filteredUsers = users.filter((user) => {
+    if (!user.email.toLowerCase().includes(searchTerm.toLowerCase())) return false;
+    if (actorRole === UserRole.CITY_MANAGER && assignedCityId) {
+      return !user.cityId || user.cityId === assignedCityId;
+    }
+    if (actorRole === UserRole.BRANCH_ADMIN && assignedBranchId) {
+      return !user.branchId || user.branchId === assignedBranchId;
+    }
+    return true;
+  });
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -152,7 +213,7 @@ const Users: React.FC = () => {
         <div>
           <p className="font-medium text-[var(--brand-dark)]">User Management</p>
           <p className="text-sm text-[var(--brand-border)] mt-1">
-            For production use, create admin and employee users through the <a href="https://app.supabase.com" target="_blank" rel="noopener noreferrer" className="underline font-medium">admin console</a> (Authentication → Users).
+            Create staff for your scope: Super Admin (all cities), City Manager (one city), Branch Admin (one outlet), Employee (counter).
           </p>
         </div>
       </div>
@@ -224,6 +285,7 @@ const Users: React.FC = () => {
                 <tr>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--brand-border)] uppercase tracking-wider">Email</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--brand-border)] uppercase tracking-wider">Role</th>
+                  <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--brand-border)] uppercase tracking-wider">Location</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--brand-border)] uppercase tracking-wider">Created</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--brand-border)] uppercase tracking-wider">Last Sign In</th>
                   <th className="px-6 py-4 text-right text-xs font-semibold text-[var(--brand-border)] uppercase tracking-wider">Actions</th>
@@ -238,13 +300,18 @@ const Users: React.FC = () => {
                     <td className="px-6 py-4">
                       <span
                         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${
-                          user.role === 'admin'
-                            ? 'bg-[var(--brand-accent)]/20 text-[var(--brand-dark)] border border-[var(--brand-border)]'
-                            : 'bg-[var(--brand-muted)] text-[var(--brand-text-dark)] border border-[var(--brand-border)]'
+                          normalizeUserRole(user.role) === UserRole.EMPLOYEE
+                            ? 'bg-[var(--brand-muted)] text-[var(--brand-text-dark)] border border-[var(--brand-border)]'
+                            : 'bg-[var(--brand-accent)]/20 text-[var(--brand-dark)] border border-[var(--brand-border)]'
                         }`}
                       >
-                        {user.role === 'admin' ? <Shield size={12} /> : <User size={12} />}
-                        {user.role === 'admin' ? 'Admin' : 'Employee'}
+                        {normalizeUserRole(user.role) === UserRole.EMPLOYEE ? <User size={12} /> : <Shield size={12} />}
+                        {ROLE_LABELS[normalizeUserRole(user.role)]}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className="text-[var(--brand-border)] text-sm">
+                        {locationName(user.cityId, user.branchId)}
                       </span>
                     </td>
                     <td className="px-6 py-4">
@@ -296,7 +363,7 @@ const Users: React.FC = () => {
       {/* Add User Modal */}
       {showAddModal && (
         <div className="fixed inset-0 bg-[var(--brand-dark)]/20 flex items-center justify-center p-4 z-50">
-          <div className="bg-[var(--brand-surface)] rounded-2xl shadow-xl max-w-md w-full p-6 border border-[var(--brand-border)]">
+          <div className="bg-[var(--brand-surface)] rounded-2xl shadow-xl max-w-md w-full p-6 border border-[var(--brand-border)] max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-bold text-[var(--brand-dark)]">Create New User</h2>
               <button
@@ -350,45 +417,77 @@ const Users: React.FC = () => {
                 <label className="block text-sm font-medium text-[var(--brand-dark)] mb-2">
                   Role
                 </label>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setNewUser({ ...newUser, role: 'employee' })}
-                    className={`flex items-center gap-2 px-4 py-3 rounded-xl border transition-all ${
-                      newUser.role === 'employee'
-                        ? 'border-[var(--brand-border)] bg-[var(--brand-muted)] text-[var(--brand-dark)] ring-2 ring-[var(--brand-accent)]/20'
-                        : 'border-[var(--brand-border)] text-[var(--brand-border)] hover:bg-[var(--brand-surface)]'
-                    }`}
-                  >
-                    <User size={18} />
-                    <div className="text-left">
-                      <p className="text-sm font-medium">Employee</p>
-                      <p className="text-xs opacity-70">Sales & stock view</p>
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setNewUser({ ...newUser, role: 'admin' })}
-                    className={`flex items-center gap-2 px-4 py-3 rounded-xl border transition-all ${
-                      newUser.role === 'admin'
-                        ? 'border-[var(--brand-border)] bg-[var(--brand-muted)] text-[var(--brand-dark)] ring-2 ring-[var(--brand-accent)]/20'
-                        : 'border-[var(--brand-border)] text-[var(--brand-border)] hover:bg-[var(--brand-surface)]'
-                    }`}
-                  >
-                    <Shield size={18} />
-                    <div className="text-left">
-                      <p className="text-sm font-medium">Admin</p>
-                      <p className="text-xs opacity-70">Full access</p>
-                    </div>
-                  </button>
+                <div className="grid grid-cols-1 gap-2">
+                  {allowedRoles.map((role) => (
+                    <button
+                      key={role}
+                      type="button"
+                      onClick={() => setNewUser({
+                        ...newUser,
+                        role,
+                        cityId: assignedCityId || newUser.cityId,
+                        branchId: roleRequiresBranch(role) ? (assignedBranchId || newUser.branchId) : '',
+                      })}
+                      className={`flex items-center gap-2 px-4 py-3 rounded-xl border transition-all text-left ${
+                        newUser.role === role
+                          ? 'border-[var(--brand-border)] bg-[var(--brand-muted)] text-[var(--brand-dark)] ring-2 ring-[var(--brand-accent)]/20'
+                          : 'border-[var(--brand-border)] text-[var(--brand-border)] hover:bg-[var(--brand-surface)]'
+                      }`}
+                    >
+                      {role === UserRole.EMPLOYEE ? <User size={18} /> : <Shield size={18} />}
+                      <div>
+                        <p className="text-sm font-medium">{ROLE_LABELS[role]}</p>
+                      </div>
+                    </button>
+                  ))}
                 </div>
               </div>
 
+              {roleRequiresCity(normalizeUserRole(newUser.role)) && (
+                <div>
+                  <label className="block text-sm font-medium text-[var(--brand-dark)] mb-2">City</label>
+                  <select
+                    value={assignedCityId || newUser.cityId}
+                    disabled={!!assignedCityId}
+                    onChange={(event) => setNewUser({ ...newUser, cityId: event.target.value, branchId: '' })}
+                    className="w-full px-4 py-2.5 rounded-xl border border-[var(--brand-border)] bg-white text-[var(--brand-text-dark)]"
+                  >
+                    <option value="">Select city</option>
+                    {cities
+                      .filter((city) => !assignedCityId || city.id === assignedCityId)
+                      .map((city) => (
+                        <option key={city.id} value={city.id}>{city.name}</option>
+                      ))}
+                  </select>
+                </div>
+              )}
+
+              {roleRequiresBranch(normalizeUserRole(newUser.role)) && (
+                <div>
+                  <label className="block text-sm font-medium text-[var(--brand-dark)] mb-2">Branch</label>
+                  <select
+                    value={assignedBranchId || newUser.branchId}
+                    disabled={!!assignedBranchId}
+                    onChange={(event) => setNewUser({ ...newUser, branchId: event.target.value })}
+                    className="w-full px-4 py-2.5 rounded-xl border border-[var(--brand-border)] bg-white text-[var(--brand-text-dark)]"
+                  >
+                    <option value="">Select branch</option>
+                    {branches
+                      .filter((branch) => {
+                        const cityId = assignedCityId || newUser.cityId;
+                        if (assignedBranchId) return branch.id === assignedBranchId;
+                        return !cityId || branch.cityId === cityId;
+                      })
+                      .map((branch) => (
+                        <option key={branch.id} value={branch.id}>{branch.name}</option>
+                      ))}
+                  </select>
+                </div>
+              )}
+
               <div className="bg-[var(--brand-muted)] border border-[var(--brand-border)] p-3 rounded-lg">
                 <p className="text-xs text-[var(--brand-border)]">
-                  {newUser.role === 'admin'
-                    ? 'Admins get full access: dashboard, billing, inventory editing, customers, and user management.'
-                    : 'Employees can record sales, view inventory (read-only), and manage customers. No user management or inventory editing.'}
+                  {ROLE_LABELS[normalizeUserRole(newUser.role)]} accounts stay inside the city or branch you assign here.
                 </p>
               </div>
 

@@ -4,8 +4,16 @@ import {
   signOut as supabaseSignOut,
   supabase,
   getUser,
-  getUserRole,
+  getSessionProfile,
   resolveUserRoleFromMetadata,
+  getCities,
+  getBranches,
+  addCity as apiAddCity,
+  updateCity as apiUpdateCity,
+  deleteCity as apiDeleteCity,
+  addBranch as apiAddBranch,
+  updateBranch as apiUpdateBranch,
+  deleteBranch as apiDeleteBranch,
   getProducts,
   getCategories,
   getSales,
@@ -32,12 +40,24 @@ import {
   voidSale as apiVoidSale,
   touchUserLastSignIn
 } from './services/supabaseService';
-import { ViewState, Product, SaleRecord, CartItem, Customer, DailyStat, UserRole, Category, Ingredient, InventoryAdjustment } from './types';
-import { MOCK_DAILY_STATS } from './constants';
+import { ViewState, Product, SaleRecord, Customer, UserRole, Category, Ingredient, InventoryAdjustment, City, Branch, SessionProfile, ShopIdentity } from './types';
+import { DEMO_BRANCHES, DEMO_CITIES, MOCK_DAILY_STATS, SHOP_ADDRESS, SHOP_NAME, SHOP_PHONE } from './constants';
 import Billing from './components/Billing';
 import Layout from "./components/Layout";
+import LocationPicker from './components/LocationPicker';
 import { updateCategory, deleteCategory } from './services/supabaseService';
 import { clearAppDataCache, loadAppDataCache, saveAppDataCache } from './utils/dataCache';
+import {
+  canAccessBilling,
+  canEditCategories,
+  canEditInventory,
+  canManageLocations,
+  canManageUsers,
+  canSwitchLocation,
+  defaultLandingView,
+  normalizeUserRole,
+} from './utils/access';
+import { isUuid, resolveBranchId, resolveCityId } from './utils/locations';
 
 import { Lock, User, Loader2 } from 'lucide-react';
 
@@ -48,6 +68,7 @@ const Inventory = lazy(() => import('./components/Inventory'));
 const Customers = lazy(() => import('./components/Customers'));
 const Users = lazy(() => import('./components/Users'));
 const Categories = lazy(() => import('./components/Categories'));
+const Locations = lazy(() => import('./components/Locations'));
 
 const PageLoader = () => (
   <div className="flex items-center justify-center py-16">
@@ -56,17 +77,69 @@ const PageLoader = () => (
 );
 
 const DEMO_AUTH_STORAGE_KEY = 'suvai_demo_auth';
+const LOCATION_STORAGE_KEY = 'suvai_location';
 
-const readStoredDemoRole = (): UserRole | null => {
+const readStoredDemoProfile = (): SessionProfile | null => {
   const stored = sessionStorage.getItem(DEMO_AUTH_STORAGE_KEY);
-  if (stored === UserRole.ADMIN || stored === UserRole.EMPLOYEE) return stored;
+  if (!stored) return null;
+  if (stored === 'admin' || stored === UserRole.SUPER_ADMIN) {
+    return { role: UserRole.SUPER_ADMIN, cityId: null, branchId: null };
+  }
+  if (stored === UserRole.EMPLOYEE) {
+    return { role: UserRole.EMPLOYEE, cityId: DEMO_CITIES[0].id, branchId: DEMO_BRANCHES[0].id };
+  }
+  try {
+    const parsed = JSON.parse(stored);
+    if (!parsed?.role) return null;
+    return {
+      role: normalizeUserRole(parsed.role),
+      cityId: resolveCityId(parsed.cityId),
+      branchId: resolveBranchId(parsed.branchId),
+    };
+  } catch {
+    return null;
+  }
+};
+
+const readStoredLocation = (): { cityId: string | null; branchId: string | null } | null => {
+  const stored = sessionStorage.getItem(LOCATION_STORAGE_KEY);
+  if (!stored) return null;
+  try {
+    const parsed = JSON.parse(stored);
+    return {
+      cityId: resolveCityId(parsed.cityId),
+      branchId: resolveBranchId(parsed.branchId),
+    };
+  } catch {
+    return null;
+  }
+};
+
+const writeStoredLocation = (cityId: string | null, branchId: string | null) => {
+  sessionStorage.setItem(LOCATION_STORAGE_KEY, JSON.stringify({ cityId, branchId }));
+};
+
+const resolveDemoProfile = (username: string): SessionProfile | null => {
+  const value = username.trim().toLowerCase();
+  if (value === 'admin' || value.startsWith('admin@')) {
+    return { role: UserRole.SUPER_ADMIN, cityId: null, branchId: null };
+  }
+  if (value === 'city' || value.startsWith('city@')) {
+    return { role: UserRole.CITY_MANAGER, cityId: DEMO_CITIES[0].id, branchId: null };
+  }
+  if (value === 'branch' || value.startsWith('branch@')) {
+    return { role: UserRole.BRANCH_ADMIN, cityId: DEMO_CITIES[0].id, branchId: DEMO_BRANCHES[0].id };
+  }
+  if (value === 'employee' || value.startsWith('employee@')) {
+    return { role: UserRole.EMPLOYEE, cityId: DEMO_CITIES[0].id, branchId: DEMO_BRANCHES[0].id };
+  }
   return null;
 };
 
 const readCachedAppData = () => loadAppDataCache({ allowStale: true });
 
 // Login Component
-const Login = ({ onLogin }: { onLogin: (role: UserRole, isDemo?: boolean) => void }) => {
+const Login = ({ onLogin }: { onLogin: (profile: SessionProfile, isDemo?: boolean) => void }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -77,15 +150,11 @@ const Login = ({ onLogin }: { onLogin: (role: UserRole, isDemo?: boolean) => voi
     setError('');
     setLoading(true);
     try {
-      // Demo login for testing - accept "admin" or any email starting with "admin"
-      const isAdminDemo = username === 'admin' || username.startsWith('admin@');
-      const isEmployeeDemo = username === 'employee' || username.startsWith('employee@');
-      if (isAdminDemo && password === 'demo') {
-        onLogin(UserRole.ADMIN, true);
-        return;
-      }
-      if (isEmployeeDemo && password === 'demo') {
-        onLogin(UserRole.EMPLOYEE, true);
+      const email = username.trim();
+      const loginPassword = password.trim();
+      const demoProfile = resolveDemoProfile(email);
+      if (demoProfile && loginPassword === 'demo') {
+        onLogin(demoProfile, true);
         return;
       }
 
@@ -95,7 +164,7 @@ const Login = ({ onLogin }: { onLogin: (role: UserRole, isDemo?: boolean) => voi
         return;
       }
 
-      const { error } = await supabaseSignIn(username, password);
+      const { error } = await supabaseSignIn(email, loginPassword);
       if (error) {
         setError(error.message || 'Authentication failed.');
         setLoading(false);
@@ -105,8 +174,8 @@ const Login = ({ onLogin }: { onLogin: (role: UserRole, isDemo?: boolean) => voi
       if (data.user?.id) {
         await touchUserLastSignIn(data.user.id);
       }
-      const role = await getUserRole(data.user);
-      onLogin(role, false);
+      const profile = await getSessionProfile(data.user);
+      onLogin(profile, false);
 
     } catch (err: any) {
       setError(err?.message || 'Unexpected error during authentication.');
@@ -122,7 +191,7 @@ const Login = ({ onLogin }: { onLogin: (role: UserRole, isDemo?: boolean) => voi
             <Lock className="text-[var(--brand-dark)]" size={24} />
           </div>
           <h1 className="text-2xl font-bold text-[var(--brand-text-dark)]">Welcome Back</h1>
-          <p className="text-[var(--brand-text-dark)] text-sm mt-1">Secure Admin Login</p>
+          <p className="text-[var(--brand-text-dark)] text-sm mt-1">City and branch login</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-5">
@@ -131,12 +200,13 @@ const Login = ({ onLogin }: { onLogin: (role: UserRole, isDemo?: boolean) => voi
             <div className="relative">
               <User className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--brand-border)] z-10" size={18} />
               <input
-                type="email"
+                type="text"
                 value={username}
                 onChange={e => setUsername(e.target.value)}
                 className="w-full pl-10 pr-4 py-3 rounded-xl border border-[var(--brand-border)] focus:ring-2 focus:ring-[var(--brand-accent)]/20 focus:border-[var(--brand-accent)] outline-none transition-all text-[var(--brand-text-dark)] bg-white placeholder-slate-300"
-                placeholder="Enter email"
+                placeholder="Email or demo user"
                 required
+                autoComplete="username"
               />
             </div>
           </div>
@@ -163,6 +233,9 @@ const Login = ({ onLogin }: { onLogin: (role: UserRole, isDemo?: boolean) => voi
           >
             {loading ? <Loader2 className="animate-spin" size={20} /> : 'Sign In'}
           </button>
+          <p className="text-[11px] text-center text-[var(--brand-border)] leading-relaxed">
+            Demo: admin / city / branch / employee — password <span className="font-semibold">demo</span>
+          </p>
         </form>
       </div>
     </div>
@@ -170,14 +243,27 @@ const Login = ({ onLogin }: { onLogin: (role: UserRole, isDemo?: boolean) => voi
 };
 
 const App: React.FC = () => {
-  const initialDemoRole = readStoredDemoRole();
-  const initialCache = initialDemoRole ? readCachedAppData() : null;
+  const initialDemoProfile = readStoredDemoProfile();
+  const initialLocation = readStoredLocation();
+  const initialCache = initialDemoProfile ? readCachedAppData() : null;
 
-  const [isLoggedIn, setIsLoggedIn] = useState(!!initialDemoRole);
-  const [isAuthLoading, setIsAuthLoading] = useState(!initialDemoRole);
-  const [userRole, setUserRole] = useState<UserRole | null>(initialDemoRole);
+  const [isLoggedIn, setIsLoggedIn] = useState(!!initialDemoProfile);
+  const [isAuthLoading, setIsAuthLoading] = useState(!initialDemoProfile);
+  const [userRole, setUserRole] = useState<UserRole | null>(initialDemoProfile?.role ?? null);
+  const [assignedCityId, setAssignedCityId] = useState<string | null>(initialDemoProfile?.cityId ?? null);
+  const [assignedBranchId, setAssignedBranchId] = useState<string | null>(initialDemoProfile?.branchId ?? null);
+  const [selectedCityId, setSelectedCityId] = useState<string | null>(
+    initialLocation?.cityId ?? initialDemoProfile?.cityId ?? null
+  );
+  const [selectedBranchId, setSelectedBranchId] = useState<string | null>(
+    initialLocation?.branchId ?? initialDemoProfile?.branchId ?? null
+  );
+  const [cities, setCities] = useState<City[]>(DEMO_CITIES);
+  const [branches, setBranches] = useState<Branch[]>(DEMO_BRANCHES);
+  const [showLocationPicker, setShowLocationPicker] = useState(false);
+  const [isDemoSession, setIsDemoSession] = useState(!!initialDemoProfile);
   const [currentView, setCurrentView] = useState<ViewState>(
-    initialDemoRole === UserRole.EMPLOYEE ? ViewState.BILLING : ViewState.DASHBOARD
+    defaultLandingView(initialDemoProfile?.role ?? UserRole.SUPER_ADMIN)
   );
 
   // Data State
@@ -190,6 +276,29 @@ const App: React.FC = () => {
   const [sales, setSales] = useState<SaleRecord[]>(initialCache?.sales ?? []);
   const [customers, setCustomers] = useState<Customer[]>(initialCache?.customers ?? []);
   const [isSyncingData, setIsSyncingData] = useState(false);
+
+  const applyProfile = (profile: SessionProfile, options?: { skipLocation?: boolean }) => {
+    setUserRole(profile.role);
+    setAssignedCityId(profile.cityId);
+    setAssignedBranchId(profile.branchId);
+    if (options?.skipLocation) return;
+    if (!canSwitchLocation(profile.role)) {
+      setSelectedCityId(profile.cityId);
+      setSelectedBranchId(profile.branchId);
+      if (profile.cityId || profile.branchId) {
+        writeStoredLocation(profile.cityId, profile.branchId);
+      }
+      return;
+    }
+    const stored = readStoredLocation();
+    if (stored) {
+      setSelectedCityId(stored.cityId ?? profile.cityId);
+      setSelectedBranchId(stored.branchId);
+      return;
+    }
+    setSelectedCityId(profile.cityId);
+    setSelectedBranchId(profile.branchId);
+  };
 
   // Dynamic stats derived from interactions
   const [notifications, setNotifications] = useState<{id: string, message: string}[]>([]);
@@ -212,13 +321,14 @@ const App: React.FC = () => {
 
     const restoreSession = async () => {
       try {
-        const storedDemoRole = readStoredDemoRole();
-        if (storedDemoRole) {
+        const storedDemoProfile = readStoredDemoProfile();
+        if (storedDemoProfile) {
           if (!isMounted) return;
           applyCachedData(readCachedAppData());
-          setUserRole(storedDemoRole);
+          applyProfile(storedDemoProfile);
+          setIsDemoSession(true);
           setIsLoggedIn(true);
-          setCurrentView(storedDemoRole === UserRole.EMPLOYEE ? ViewState.BILLING : ViewState.DASHBOARD);
+          setCurrentView(defaultLandingView(storedDemoProfile.role));
           setIsAuthLoading(false);
           return;
         }
@@ -231,18 +341,22 @@ const App: React.FC = () => {
         const { data: { session } } = await supabase.auth.getSession();
         if (!session?.user) return;
 
-        const quickRole = resolveUserRoleFromMetadata(session.user) ?? UserRole.ADMIN;
+        const quickRole = resolveUserRoleFromMetadata(session.user) ?? UserRole.SUPER_ADMIN;
         if (!isMounted) return;
         applyCachedData(readCachedAppData());
-        setUserRole(quickRole);
+        applyProfile({
+          role: quickRole,
+          cityId: session.user.user_metadata?.city_id ?? null,
+          branchId: session.user.user_metadata?.branch_id ?? null,
+        });
         setIsLoggedIn(true);
-        setCurrentView(quickRole === UserRole.EMPLOYEE ? ViewState.BILLING : ViewState.DASHBOARD);
+        setCurrentView(defaultLandingView(quickRole));
 
-        getUserRole(session.user)
-          .then((verifiedRole) => {
+        getSessionProfile(session.user)
+          .then((verifiedProfile) => {
             if (!isMounted) return;
-            setUserRole(verifiedRole);
-            setCurrentView(verifiedRole === UserRole.EMPLOYEE ? ViewState.BILLING : ViewState.DASHBOARD);
+            applyProfile(verifiedProfile);
+            setCurrentView(defaultLandingView(verifiedProfile.role));
           })
           .catch((error) => {
             console.error('Failed to verify user role:', error);
@@ -272,9 +386,9 @@ const App: React.FC = () => {
           if (event === 'SIGNED_IN') {
             await touchUserLastSignIn(session.user.id);
           }
-          const role = await getUserRole(session.user);
+          const profile = await getSessionProfile(session.user);
           if (!isMounted) return;
-          setUserRole(role);
+          applyProfile(profile);
           setIsLoggedIn(true);
         } catch (error) {
           console.error('Failed to resolve user role:', error);
@@ -282,6 +396,8 @@ const App: React.FC = () => {
       } else if (isMounted) {
         setIsLoggedIn(false);
         setUserRole(null);
+        setAssignedCityId(null);
+        setAssignedBranchId(null);
         clearAppDataCache();
       }
     });
@@ -325,11 +441,19 @@ const App: React.FC = () => {
     if (!isBackground) setIsSyncingData(true);
 
     try {
-      const [prods, cats, custs] = await Promise.all([
-        getProducts(),
+      const [prods, cats, custs, nextCities, nextBranches] = await Promise.all([
+        getProducts(selectedBranchId),
         getCategories(),
         getCustomers(),
+        getCities(),
+        getBranches(),
       ]);
+      setCities(nextCities);
+      setBranches(nextBranches);
+      setSelectedCityId((current) => resolveCityId(current, nextCities) ?? current);
+      setSelectedBranchId((current) => resolveBranchId(current, nextBranches) ?? current);
+      setAssignedCityId((current) => resolveCityId(current, nextCities) ?? current);
+      setAssignedBranchId((current) => resolveBranchId(current, nextBranches) ?? current);
 
       setProducts(prods);
       setCategories(cats);
@@ -359,21 +483,95 @@ const App: React.FC = () => {
   }, [isLoggedIn]);
 
   useEffect(() => {
-    if (userRole === UserRole.EMPLOYEE && [ViewState.USERS, ViewState.CATEGORIES].includes(currentView)) {
-      setCurrentView(ViewState.BILLING);
+    if (!isLoggedIn) return;
+    let cancelled = false;
+    const loadBranchStock = async () => {
+      try {
+        const prods = await getProducts(selectedBranchId);
+        if (!cancelled) setProducts(prods);
+      } catch (error) {
+        console.error('Failed to load branch stock:', error);
+      }
+    };
+    void loadBranchStock();
+    return () => {
+      cancelled = true;
+    };
+  }, [isLoggedIn, selectedBranchId]);
+
+  useEffect(() => {
+    if (!userRole) return;
+    if (currentView === ViewState.USERS && !canManageUsers(userRole)) {
+      setCurrentView(defaultLandingView(userRole));
     }
-  }, [currentView, userRole]);
+    if (currentView === ViewState.CATEGORIES && !canEditCategories(userRole)) {
+      setCurrentView(defaultLandingView(userRole));
+    }
+    if (currentView === ViewState.LOCATIONS && !canManageLocations(userRole)) {
+      setCurrentView(defaultLandingView(userRole));
+    }
+    if (currentView === ViewState.BILLING && !canAccessBilling(userRole)) {
+      setCurrentView(defaultLandingView(userRole));
+    }
+    if (currentView === ViewState.BILLING && !selectedBranchId && canSwitchLocation(userRole) && canAccessBilling(userRole)) {
+      setShowLocationPicker(true);
+    }
+  }, [currentView, userRole, selectedBranchId]);
+
+  const scopedSales = useMemo(() => {
+    const cityBranchIds = selectedCityId
+      ? branches.filter((branch) => branch.cityId === selectedCityId).map((branch) => branch.id)
+      : [];
+
+    return sales.filter((sale) => {
+      if (!sale.branchId) return isDemoSession || !selectedBranchId;
+      if (selectedBranchId) return sale.branchId === selectedBranchId;
+      if (selectedCityId) return cityBranchIds.includes(sale.branchId);
+      return true;
+    });
+  }, [sales, selectedBranchId, selectedCityId, branches, isDemoSession]);
+
+  const selectedBranch = branches.find((branch) => branch.id === selectedBranchId) ?? null;
+  const selectedCity = cities.find((city) => city.id === (selectedCityId ?? selectedBranch?.cityId)) ?? null;
+  const shopIdentity: ShopIdentity = {
+    name: selectedBranch ? `${SHOP_NAME} — ${selectedBranch.name}` : SHOP_NAME,
+    address: selectedBranch?.address || selectedCity?.name || SHOP_ADDRESS,
+    phone: selectedBranch?.phone || SHOP_PHONE,
+  };
+
+  const branchSummaries = useMemo(() => {
+    const scopedBranches = selectedCityId
+      ? branches.filter((branch) => branch.cityId === selectedCityId)
+      : branches;
+    if (selectedBranchId || scopedBranches.length <= 1) return [];
+    return scopedBranches.map((branch) => {
+      const branchSales = sales.filter((sale) => sale.branchId === branch.id);
+      return {
+        id: branch.id,
+        name: branch.name,
+        cityName: cities.find((city) => city.id === branch.cityId)?.name || '',
+        sales: branchSales.reduce((sum, sale) => sum + sale.total, 0),
+        orders: branchSales.length,
+      };
+    });
+  }, [branches, cities, sales, selectedBranchId, selectedCityId]);
+
+  const locationLabel = selectedBranch
+    ? `${selectedCity?.name || 'City'} · ${selectedBranch.name}`
+    : selectedCity
+      ? `${selectedCity.name} · All branches`
+      : 'All cities';
 
   const salesTodayTotal = useMemo(() => {
     const now = new Date();
-    return sales
+    return scopedSales
       .filter((sale) =>
         sale.timestamp.getFullYear() === now.getFullYear() &&
         sale.timestamp.getMonth() === now.getMonth() &&
         sale.timestamp.getDate() === now.getDate()
       )
       .reduce((sum, sale) => sum + sale.total, 0);
-  }, [sales]);
+  }, [scopedSales]);
 
   useEffect(() => {
     // Calculate notifications based on low stock
@@ -427,7 +625,7 @@ const App: React.FC = () => {
 
   const refreshAfterSale = async () => {
     try {
-      const [prods, custs] = await Promise.all([getProducts(), getCustomers()]);
+      const [prods, custs] = await Promise.all([getProducts(selectedBranchId), getCustomers()]);
       setProducts(prods);
       setCustomers(custs);
 
@@ -445,10 +643,19 @@ const App: React.FC = () => {
   };
 
   const handleCompleteSales = async (salesPayload: Omit<SaleRecord, 'id' | 'timestamp'>[]): Promise<SaleRecord[]> => {
+    const branchId = resolveBranchId(selectedBranchId, branches);
+    if (!branchId || !isUuid(branchId)) {
+      if (userRole && canSwitchLocation(userRole)) {
+        setShowLocationPicker(true);
+      }
+      throw new Error('Select a branch before creating a bill.');
+    }
+
     const pendingSales: SaleRecord[] = salesPayload.map((salePayload) => ({
       id: '',
       timestamp: new Date(),
       ...salePayload,
+      branchId,
       pointsEarned: salePayload.pointsEarned ?? Math.floor(salePayload.total),
     }));
 
@@ -505,7 +712,7 @@ const App: React.FC = () => {
 
   const handleAddProduct = async (productData: Omit<Product, 'id'>) => {
     try {
-      await apiAddProduct(productData);
+      await apiAddProduct(productData, selectedBranchId);
       await fetchData({ background: true });
     } catch (error: any) {
       console.error("Failed to add product:", error);
@@ -529,7 +736,7 @@ const App: React.FC = () => {
 
   const handleUpdateProduct = async (updatedProduct: Product) => {
     try {
-      await apiUpdateProduct(updatedProduct);
+      await apiUpdateProduct(updatedProduct, selectedBranchId);
       await fetchData({ background: true });
     } catch (error: any) {
       console.error("Failed to update product:", error);
@@ -616,7 +823,10 @@ const App: React.FC = () => {
 
   const handleAdjustProductStock = async (productId: string, adjustment: number, reason: string) => {
     try {
-      await apiAdjustProductStock(productId, adjustment, reason, userRole ?? 'system');
+      if (!selectedBranchId) {
+        throw new Error('Select a branch before changing product stock.');
+      }
+      await apiAdjustProductStock(productId, adjustment, reason, userRole ?? 'system', selectedBranchId);
       await fetchData({ background: true });
     } catch (error: any) {
       console.error('Failed to adjust product stock:', error);
@@ -634,17 +844,114 @@ const App: React.FC = () => {
     }
   };
 
-  const handleLogin = (role: UserRole, isDemo = false) => {
+  const refreshLocations = async () => {
+    const [nextCities, nextBranches] = await Promise.all([getCities(), getBranches()]);
+    setCities(nextCities);
+    setBranches(nextBranches);
+    return { nextCities, nextBranches };
+  };
+
+  const handleAddCity = async (name: string) => {
+    const created = await apiAddCity(name);
+    if (!supabase) {
+      setCities((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+      return;
+    }
+    await refreshLocations();
+  };
+
+  const handleUpdateCity = async (id: string, name: string) => {
+    const updated = await apiUpdateCity(id, name);
+    if (!supabase) {
+      setCities((prev) => prev.map((city) => (city.id === id ? updated : city)));
+      return;
+    }
+    await refreshLocations();
+  };
+
+  const handleDeleteCity = async (id: string) => {
+    await apiDeleteCity(id);
+    if (!supabase) {
+      setCities((prev) => prev.filter((city) => city.id !== id));
+      setBranches((prev) => prev.filter((branch) => branch.cityId !== id));
+    } else {
+      await refreshLocations();
+    }
+    if (selectedCityId === id) {
+      setSelectedCityId(null);
+      setSelectedBranchId(null);
+      writeStoredLocation(null, null);
+    }
+  };
+
+  const handleAddBranch = async (payload: { cityId: string; name: string; address?: string; phone?: string }) => {
+    const created = await apiAddBranch(payload);
+    if (!supabase) {
+      setBranches((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+      return;
+    }
+    await refreshLocations();
+  };
+
+  const handleUpdateBranch = async (branch: Branch) => {
+    const updated = await apiUpdateBranch(branch);
+    if (!supabase) {
+      setBranches((prev) => prev.map((item) => (item.id === branch.id ? updated : item)));
+      return;
+    }
+    await refreshLocations();
+  };
+
+  const handleDeleteBranch = async (id: string) => {
+    await apiDeleteBranch(id);
+    if (!supabase) {
+      setBranches((prev) => prev.filter((branch) => branch.id !== id));
+    } else {
+      await refreshLocations();
+    }
+    if (selectedBranchId === id) {
+      setSelectedBranchId(null);
+      writeStoredLocation(selectedCityId, null);
+    }
+  };
+
+  const handleLogin = (profile: SessionProfile, isDemo = false) => {
     if (isDemo) {
-      sessionStorage.setItem(DEMO_AUTH_STORAGE_KEY, role);
+      sessionStorage.setItem(DEMO_AUTH_STORAGE_KEY, JSON.stringify(profile));
       applyCachedData(readCachedAppData());
+      setCities(DEMO_CITIES);
+      setBranches(DEMO_BRANCHES);
     } else {
       sessionStorage.removeItem(DEMO_AUTH_STORAGE_KEY);
     }
-    setUserRole(role);
+    setIsDemoSession(isDemo);
+    applyProfile(profile);
     setIsLoggedIn(true);
     setIsAuthLoading(false);
-    setCurrentView(role === UserRole.EMPLOYEE ? ViewState.BILLING : ViewState.DASHBOARD);
+    setCurrentView(defaultLandingView(profile.role));
+    if (canSwitchLocation(profile.role) && !readStoredLocation()) {
+      setShowLocationPicker(true);
+    }
+  };
+
+  const requireBillingBranch = currentView === ViewState.BILLING && canAccessBilling(userRole ?? UserRole.EMPLOYEE);
+
+  const handleConfirmLocation = (selection: { cityId: string | null; branchId: string | null }) => {
+    if (requireBillingBranch && !selection.branchId) {
+      setShowLocationPicker(true);
+      return;
+    }
+    setSelectedCityId(selection.cityId);
+    setSelectedBranchId(selection.branchId);
+    writeStoredLocation(selection.cityId, selection.branchId);
+    setShowLocationPicker(false);
+  };
+
+  const handleCancelLocation = () => {
+    setShowLocationPicker(false);
+    if (requireBillingBranch && !selectedBranchId) {
+      setCurrentView(ViewState.DASHBOARD);
+    }
   };
 
   if (isAuthLoading) {
@@ -662,6 +969,29 @@ const App: React.FC = () => {
     return <Login onLogin={handleLogin} />;
   }
 
+  if (showLocationPicker && userRole && canSwitchLocation(userRole)) {
+    return (
+      <LocationPicker
+        role={userRole}
+        cities={cities}
+        branches={branches}
+        assignedCityId={assignedCityId}
+        assignedBranchId={assignedBranchId}
+        initialCityId={selectedCityId}
+        initialBranchId={selectedBranchId}
+        allowAll={!requireBillingBranch}
+        requireBranch={requireBillingBranch}
+        title={requireBillingBranch ? 'Choose an outlet' : undefined}
+        subtitle={requireBillingBranch
+          ? 'Billing is per branch. Pick one outlet. All branches is only for dashboards.'
+          : undefined}
+        confirmLabel={requireBillingBranch ? 'Open billing' : 'Continue'}
+        onConfirm={handleConfirmLocation}
+        onCancel={readStoredLocation() ? handleCancelLocation : undefined}
+      />
+    );
+  }
+
   return (
     <Layout
       currentView={currentView}
@@ -670,6 +1000,7 @@ const App: React.FC = () => {
       onLogout={async () => {
         try {
           sessionStorage.removeItem(DEMO_AUTH_STORAGE_KEY);
+          sessionStorage.removeItem(LOCATION_STORAGE_KEY);
           if (supabase) await supabaseSignOut();
         } catch (err) {
           console.warn('Sign-out failed:', err);
@@ -677,9 +1008,21 @@ const App: React.FC = () => {
         clearAppDataCache();
         setIsLoggedIn(false);
         setUserRole(null);
+        setAssignedCityId(null);
+        setAssignedBranchId(null);
+        setSelectedCityId(null);
+        setSelectedBranchId(null);
+        setShowLocationPicker(false);
+        setIsDemoSession(false);
       }}
       notifications={notifications}
-      userRole={userRole ?? UserRole.ADMIN}
+      userRole={userRole ?? UserRole.SUPER_ADMIN}
+      locationLabel={locationLabel}
+      cities={cities}
+      branches={branches}
+      selectedCityId={selectedCityId}
+      selectedBranchId={selectedBranchId}
+      onChangeLocation={canSwitchLocation(userRole ?? UserRole.SUPER_ADMIN) ? () => setShowLocationPicker(true) : undefined}
     >
       {isSyncingData && products.length === 0 && (
         <div className="mx-3 sm:mx-4 md:mx-6 mt-2 rounded-xl border border-[var(--brand-border)] bg-[var(--brand-surface)] px-4 py-2 text-sm text-[var(--brand-dark)] flex items-center gap-2">
@@ -690,25 +1033,38 @@ const App: React.FC = () => {
       <Suspense fallback={<PageLoader />}>
         {currentView === ViewState.DASHBOARD && (
           userRole === UserRole.EMPLOYEE ? (
-            <EmployeeDashboard sales={sales} products={products} dailyStats={MOCK_DAILY_STATS} />
+            <EmployeeDashboard
+              sales={scopedSales}
+              products={products}
+              dailyStats={MOCK_DAILY_STATS}
+              locationLabel={locationLabel}
+            />
           ) : (
-            <Dashboard sales={sales} products={products} dailyStats={MOCK_DAILY_STATS} />
+            <Dashboard
+              sales={scopedSales}
+              products={products}
+              dailyStats={MOCK_DAILY_STATS}
+              locationLabel={locationLabel}
+              branchSummaries={branchSummaries}
+            />
           )
         )}
-        {currentView === ViewState.BILLING && (
+        {currentView === ViewState.BILLING && canAccessBilling(userRole ?? UserRole.EMPLOYEE) && (
           <Billing
             products={products}
             customers={customers}
             categories={categories}
             salesTodayTotal={salesTodayTotal}
+            shop={shopIdentity}
             onCompleteSales={handleCompleteSales}
           />
         )}
         {currentView === ViewState.BILLS && (
           <BillsHistory
-            sales={sales}
+            sales={scopedSales}
             customers={customers}
-            userRole={userRole ?? UserRole.ADMIN}
+            userRole={userRole ?? UserRole.SUPER_ADMIN}
+            shop={shopIdentity}
             onUpdateSale={handleUpdateSale}
             onVoidSale={handleVoidSale}
           />
@@ -716,13 +1072,19 @@ const App: React.FC = () => {
         {currentView === ViewState.CUSTOMERS && (
           <Customers
             customers={customers}
-            sales={sales}
+            sales={scopedSales}
             onAddCustomer={handleAddCustomer}
             onDeleteCustomer={handleDeleteCustomer}
           />
         )}
-        {currentView === ViewState.USERS && userRole === UserRole.ADMIN && (
-          <Users />
+        {currentView === ViewState.USERS && userRole && canManageUsers(userRole) && (
+          <Users
+            actorRole={userRole}
+            assignedCityId={assignedCityId}
+            assignedBranchId={assignedBranchId}
+            cities={cities}
+            branches={branches}
+          />
         )}
         {currentView === ViewState.INVENTORY && (
           <Inventory
@@ -730,6 +1092,8 @@ const App: React.FC = () => {
               categories={categories}
               ingredients={ingredients}
               inventoryAdjustments={inventoryAdjustments}
+              stockLocationLabel={selectedBranch?.name ?? null}
+              canEditProductStock={Boolean(selectedBranchId)}
               onAddProduct={handleAddProduct}
               onAddCategory={handleAddCategory}
               onAddIngredient={handleAddIngredient}
@@ -742,16 +1106,28 @@ const App: React.FC = () => {
               onFetchDeletedItems={handleFetchDeletedItems}
               onRestoreProduct={handleRestoreProduct}
               onRestoreIngredient={handleRestoreIngredient}
-              canEdit={userRole === UserRole.ADMIN}
+              canEdit={canEditInventory(userRole ?? UserRole.EMPLOYEE)}
             />
         )}
-        {currentView === ViewState.CATEGORIES && userRole === UserRole.ADMIN && (
+        {currentView === ViewState.CATEGORIES && userRole && canEditCategories(userRole) && (
           <Categories
             categories={categories}
             onAddCategory={handleAddCategory}
             onUpdateCategory={async (id, name, file) => { try { await updateCategory(id, name, file as any); const latest = await getCategories(); setCategories(latest); } catch (err) { console.error(err); alert('Failed to update category'); } }}
             onDeleteCategory={async (id) => { try { await deleteCategory(id); const latest = await getCategories(); setCategories(latest); } catch (err) { console.error(err); alert('Failed to delete category'); } }}
-            canEdit={userRole === UserRole.ADMIN}
+            canEdit={canEditCategories(userRole)}
+          />
+        )}
+        {currentView === ViewState.LOCATIONS && userRole && canManageLocations(userRole) && (
+          <Locations
+            cities={cities}
+            branches={branches}
+            onAddCity={handleAddCity}
+            onUpdateCity={handleUpdateCity}
+            onDeleteCity={handleDeleteCity}
+            onAddBranch={handleAddBranch}
+            onUpdateBranch={handleUpdateBranch}
+            onDeleteBranch={handleDeleteBranch}
           />
         )}
       </Suspense>

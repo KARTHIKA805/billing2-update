@@ -1,6 +1,7 @@
 import React, { useMemo, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { SaleRecord, Customer, UserRole, CartItem } from '../types';
+import { SaleRecord, Customer, UserRole, CartItem, ShopIdentity } from '../types';
+import { canEditBills } from '../utils/access';
 import { Clock, Eye, Pencil, Printer, Search, Trash2, X } from 'lucide-react';
 import ReceiptPrintBlock from './ReceiptPrintBlock';
 import { formatPaymentLabel } from '../utils/receiptFormat';
@@ -9,6 +10,7 @@ interface BillsHistoryProps {
   sales: SaleRecord[];
   customers: Customer[];
   userRole: UserRole;
+  shop?: ShopIdentity;
   onUpdateSale: (sale: SaleRecord) => Promise<void>;
   onVoidSale: (sale: SaleRecord) => Promise<void>;
 }
@@ -18,7 +20,7 @@ const isToday = (date: Date) => {
   return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
 };
 
-const BillsHistory: React.FC<BillsHistoryProps> = ({ sales, customers, userRole, onUpdateSale, onVoidSale }) => {
+const BillsHistory: React.FC<BillsHistoryProps> = ({ sales, customers, userRole, shop, onUpdateSale, onVoidSale }) => {
   const [search, setSearch] = useState('');
   const [selectedSale, setSelectedSale] = useState<SaleRecord | null>(null);
   const [editingSale, setEditingSale] = useState<SaleRecord | null>(null);
@@ -213,7 +215,7 @@ const BillsHistory: React.FC<BillsHistoryProps> = ({ sales, customers, userRole,
                     <div className="flex items-center justify-end gap-2">
                       <button onClick={() => setSelectedSale(sale)} className="p-2 rounded-lg border border-[var(--brand-border)] hover:bg-white" title="View"><Eye size={16} /></button>
                       <button onClick={() => printSale(sale)} className="p-2 rounded-lg border border-[var(--brand-border)] hover:bg-white" title="Print"><Printer size={16} /></button>
-                      {userRole === UserRole.ADMIN && (
+                      {canEditBills(userRole) && (
                         <>
                           <button onClick={() => openEdit(sale)} className="p-2 rounded-lg border border-[var(--brand-border)] hover:bg-white" title="Edit"><Pencil size={16} /></button>
                           <button onClick={() => handleVoid(sale)} className="p-2 rounded-lg border border-red-200 text-red-600 hover:bg-red-50" title="Void"><Trash2 size={16} /></button>
@@ -310,6 +312,7 @@ const BillsHistory: React.FC<BillsHistoryProps> = ({ sales, customers, userRole,
             sale={selectedSale}
             customerLabel={getDisplayCustomer(selectedSale)}
             active={printTargetSaleId === selectedSale.id}
+            shop={shop}
           />
         </div>,
         document.body
