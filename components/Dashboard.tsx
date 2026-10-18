@@ -20,9 +20,11 @@ interface DashboardProps {
   dailyStats: DailyStat[];
   locationLabel?: string;
   branchSummaries?: BranchSummary[];
+  selectedBranchId?: string | null;
+  onSelectBranch?: (branchId: string | null) => void;
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ sales, products, dailyStats, locationLabel, branchSummaries = [] }) => {
+const Dashboard: React.FC<DashboardProps> = ({ sales, products, dailyStats, locationLabel, branchSummaries = [], selectedBranchId = null, onSelectBranch }) => {
   const [reportRange, setReportRange] = useState<'DATE' | 'WEEK' | 'MONTH' | 'YEAR'>('WEEK');
   const [reportText, setReportText] = useState('');
   const [selectedDate, setSelectedDate] = useState<string>(() => {
@@ -296,16 +298,65 @@ const Dashboard: React.FC<DashboardProps> = ({ sales, products, dailyStats, loca
         </div>
       )}
 
-      {branchSummaries.length > 1 && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {branchSummaries.map((branch) => (
-            <div key={branch.id} className="bg-white border border-slate-100 rounded-2xl p-5">
-              <p className="text-xs uppercase tracking-wide text-slate-500">{branch.cityName}</p>
-              <h3 className="text-lg font-semibold text-slate-800 mt-1">{branch.name}</h3>
-              <p className="text-2xl font-bold text-slate-800 mt-3">₹{branch.sales.toFixed(2)}</p>
-              <p className="text-sm text-slate-500 mt-1">{branch.orders} orders</p>
+      {branchSummaries.length > 0 && (
+        <div className="space-y-3">
+          {onSelectBranch && (
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => onSelectBranch(null)}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium border ${
+                  !selectedBranchId
+                    ? 'bg-slate-800 text-white border-slate-800'
+                    : 'bg-white text-slate-700 border-slate-200'
+                }`}
+              >
+                All branches
+              </button>
+              {branchSummaries.map((branch) => (
+                <button
+                  key={`${branch.id}-chip`}
+                  type="button"
+                  onClick={() => onSelectBranch(branch.id)}
+                  className={`px-3 py-1.5 rounded-full text-xs font-medium border ${
+                    selectedBranchId === branch.id
+                      ? 'bg-slate-800 text-white border-slate-800'
+                      : 'bg-white text-slate-700 border-slate-200'
+                  }`}
+                >
+                  {branch.name}
+                </button>
+              ))}
             </div>
-          ))}
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {branchSummaries.map((branch) => {
+              const isActive = selectedBranchId === branch.id;
+              const cardClass = `bg-white border rounded-2xl p-5 text-left ${
+                isActive ? 'border-slate-800 ring-2 ring-slate-800/10' : 'border-slate-100'
+              } ${onSelectBranch ? 'hover:border-slate-300' : ''}`;
+              return onSelectBranch ? (
+                <button
+                  key={branch.id}
+                  type="button"
+                  onClick={() => onSelectBranch(isActive ? null : branch.id)}
+                  className={cardClass}
+                >
+                  <p className="text-xs uppercase tracking-wide text-slate-500">{branch.cityName}</p>
+                  <h3 className="text-lg font-semibold text-slate-800 mt-1">{branch.name}</h3>
+                  <p className="text-2xl font-bold text-slate-800 mt-3">₹{branch.sales.toFixed(2)}</p>
+                  <p className="text-sm text-slate-500 mt-1">{branch.orders} orders</p>
+                </button>
+              ) : (
+                <div key={branch.id} className={cardClass}>
+                  <p className="text-xs uppercase tracking-wide text-slate-500">{branch.cityName}</p>
+                  <h3 className="text-lg font-semibold text-slate-800 mt-1">{branch.name}</h3>
+                  <p className="text-2xl font-bold text-slate-800 mt-3">₹{branch.sales.toFixed(2)}</p>
+                  <p className="text-sm text-slate-500 mt-1">{branch.orders} orders</p>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

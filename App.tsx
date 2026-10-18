@@ -1,11 +1,9 @@
-import React, { useState, useEffect, useMemo, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useMemo, useRef, Suspense, lazy } from 'react';
 import {
   signIn as supabaseSignIn,
   signOut as supabaseSignOut,
   supabase,
-  getUser,
   getSessionProfile,
-  resolveUserRoleFromMetadata,
   getCities,
   getBranches,
   addCity as apiAddCity,
@@ -54,12 +52,14 @@ import {
   canManageLocations,
   canManageUsers,
   canSwitchLocation,
+  canSwitchWorkspaceBranch,
   defaultLandingView,
   normalizeUserRole,
+  scopeWorkspaceLocations,
 } from './utils/access';
 import { isUuid, resolveBranchId, resolveCityId } from './utils/locations';
 
-import { Lock, User, Loader2 } from 'lucide-react';
+import { Lock, User, Loader2, Eye, EyeOff } from 'lucide-react';
 
 const Dashboard = lazy(() => import('./components/Dashboard'));
 const EmployeeDashboard = lazy(() => import('./components/EmployeeDashboard'));
@@ -142,8 +142,18 @@ const readCachedAppData = () => loadAppDataCache({ allowStale: true });
 const Login = ({ onLogin }: { onLogin: (profile: SessionProfile, isDemo?: boolean) => void }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.removeItem('suvai_last_email');
+      localStorage.removeItem('suvai_recent_emails');
+    } catch {
+      // Ignore storage failures on locked-down browsers.
+    }
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -164,17 +174,17 @@ const Login = ({ onLogin }: { onLogin: (profile: SessionProfile, isDemo?: boolea
         return;
       }
 
-      const { error } = await supabaseSignIn(email, loginPassword);
+      const { data, error } = await supabaseSignIn(email, loginPassword);
       if (error) {
         setError(error.message || 'Authentication failed.');
         setLoading(false);
         return;
       }
-      const { data } = await getUser();
-      if (data.user?.id) {
-        await touchUserLastSignIn(data.user.id);
+      const user = data.user;
+      if (user?.id) {
+        void touchUserLastSignIn(user.id);
       }
-      const profile = await getSessionProfile(data.user);
+      const profile = await getSessionProfile(user);
       onLogin(profile, false);
 
     } catch (err: any) {
@@ -201,12 +211,16 @@ const Login = ({ onLogin }: { onLogin: (profile: SessionProfile, isDemo?: boolea
               <User className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--brand-border)] z-10" size={18} />
               <input
                 type="text"
+                inputMode="email"
                 value={username}
                 onChange={e => setUsername(e.target.value)}
                 className="w-full pl-10 pr-4 py-3 rounded-xl border border-[var(--brand-border)] focus:ring-2 focus:ring-[var(--brand-accent)]/20 focus:border-[var(--brand-accent)] outline-none transition-all text-[var(--brand-text-dark)] bg-white placeholder-slate-300"
                 placeholder="Email or demo user"
                 required
                 autoComplete="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
               />
             </div>
           </div>
@@ -215,12 +229,21 @@ const Login = ({ onLogin }: { onLogin: (profile: SessionProfile, isDemo?: boolea
             <div className="relative">
               <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--brand-border)] z-10" size={18} />
               <input
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={e => setPassword(e.target.value)}
-                className="w-full pl-10 pr-4 py-3 rounded-xl border border-[var(--brand-border)] focus:ring-2 focus:ring-[var(--brand-accent)]/20 focus:border-[var(--brand-accent)] outline-none transition-all text-[var(--brand-text-dark)] bg-white placeholder-slate-300"
+                className="w-full pl-10 pr-12 py-3 rounded-xl border border-[var(--brand-border)] focus:ring-2 focus:ring-[var(--brand-accent)]/20 focus:border-[var(--brand-accent)] outline-none transition-all text-[var(--brand-text-dark)] bg-white placeholder-slate-300"
                 required
+                autoComplete="current-password"
               />
+              <button
+                type="button"
+                onClick={() => setShowPassword((open) => !open)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--brand-border)] hover:text-[var(--brand-dark)]"
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+              >
+                {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
             </div>
           </div>
 
@@ -282,6 +305,15 @@ const App: React.FC = () => {
     setAssignedCityId(profile.cityId);
     setAssignedBranchId(profile.branchId);
     if (options?.skipLocation) return;
+    if (profile.role === UserRole.CITY_MANAGER) {
+      const stored = readStoredLocation();
+      const keepBranch = profile.cityId && stored?.cityId === profile.cityId ? stored.branchId : null;
+      setSelectedCityId(profile.cityId);
+      setSelectedBranchId(keepBranch);
+      writeStoredLocation(profile.cityId, keepBranch);
+      setShowLocationPicker(false);
+      return;
+    }
     if (!canSwitchLocation(profile.role)) {
       setSelectedCityId(profile.cityId);
       setSelectedBranchId(profile.branchId);
@@ -338,29 +370,21 @@ const App: React.FC = () => {
           return;
         }
 
-        const { data: { session } } = await supabase.auth.getSession();
+        const sessionResult = await Promise.race([
+          supabase.auth.getSession(),
+          new Promise<never>((_, reject) => {
+            window.setTimeout(() => reject(new Error('session timeout')), 2500);
+          }),
+        ]);
+        const session = sessionResult.data?.session;
         if (!session?.user) return;
 
-        const quickRole = resolveUserRoleFromMetadata(session.user) ?? UserRole.SUPER_ADMIN;
+        const verifiedProfile = await getSessionProfile(session.user);
         if (!isMounted) return;
         applyCachedData(readCachedAppData());
-        applyProfile({
-          role: quickRole,
-          cityId: session.user.user_metadata?.city_id ?? null,
-          branchId: session.user.user_metadata?.branch_id ?? null,
-        });
+        applyProfile(verifiedProfile);
         setIsLoggedIn(true);
-        setCurrentView(defaultLandingView(quickRole));
-
-        getSessionProfile(session.user)
-          .then((verifiedProfile) => {
-            if (!isMounted) return;
-            applyProfile(verifiedProfile);
-            setCurrentView(defaultLandingView(verifiedProfile.role));
-          })
-          .catch((error) => {
-            console.error('Failed to verify user role:', error);
-          });
+        setCurrentView(defaultLandingView(verifiedProfile.role));
       } catch (error) {
         console.error('Failed to restore session:', error);
       } finally {
@@ -379,13 +403,17 @@ const App: React.FC = () => {
     }
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === 'INITIAL_SESSION' || sessionStorage.getItem(DEMO_AUTH_STORAGE_KEY)) return;
+      if (
+        event === 'INITIAL_SESSION' ||
+        event === 'SIGNED_IN' ||
+        event === 'TOKEN_REFRESHED' ||
+        sessionStorage.getItem(DEMO_AUTH_STORAGE_KEY)
+      ) {
+        return;
+      }
 
       if (session?.user) {
         try {
-          if (event === 'SIGNED_IN') {
-            await touchUserLastSignIn(session.user.id);
-          }
           const profile = await getSessionProfile(session.user);
           if (!isMounted) return;
           applyProfile(profile);
@@ -476,14 +504,24 @@ const App: React.FC = () => {
     }
   };
 
+  const skipNextBranchStockLoad = useRef(true);
+
   useEffect(() => {
-    if (!isLoggedIn) return;
+    if (!isLoggedIn) {
+      skipNextBranchStockLoad.current = true;
+      return;
+    }
     const hasCache = applyCachedData(readCachedAppData());
+    skipNextBranchStockLoad.current = true;
     void fetchData({ background: hasCache });
   }, [isLoggedIn]);
 
   useEffect(() => {
     if (!isLoggedIn) return;
+    if (skipNextBranchStockLoad.current) {
+      skipNextBranchStockLoad.current = false;
+      return;
+    }
     let cancelled = false;
     const loadBranchStock = async () => {
       try {
@@ -513,54 +551,109 @@ const App: React.FC = () => {
     if (currentView === ViewState.BILLING && !canAccessBilling(userRole)) {
       setCurrentView(defaultLandingView(userRole));
     }
-    if (currentView === ViewState.BILLING && !selectedBranchId && canSwitchLocation(userRole) && canAccessBilling(userRole)) {
-      setShowLocationPicker(true);
+    if (currentView === ViewState.BILLING && !selectedBranchId && canAccessBilling(userRole) && canSwitchLocation(userRole)) {
+      const cityId = assignedCityId || selectedCityId;
+      const cityBranches = cityId ? branches.filter((branch) => branch.cityId === cityId) : [];
+      if (cityBranches.length === 1) {
+        setSelectedCityId(cityBranches[0].cityId);
+        setSelectedBranchId(cityBranches[0].id);
+        writeStoredLocation(cityBranches[0].cityId, cityBranches[0].id);
+      } else {
+        setShowLocationPicker(true);
+      }
     }
   }, [currentView, userRole, selectedBranchId]);
 
+  const workspace = useMemo(
+    () => {
+      if (!userRole) return { cities: [] as City[], branches: [] as Branch[] };
+      return scopeWorkspaceLocations(
+        userRole,
+        cities,
+        branches,
+        assignedCityId,
+        assignedBranchId,
+      );
+    },
+    [assignedBranchId, assignedCityId, branches, cities, userRole]
+  );
+
+  useEffect(() => {
+    if (userRole !== UserRole.CITY_MANAGER || !assignedCityId) return;
+    if (selectedCityId !== assignedCityId) {
+      setSelectedCityId(assignedCityId);
+    }
+    if (!selectedBranchId) return;
+    const selected = branches.find((branch) => branch.id === selectedBranchId);
+    if (!selected || selected.cityId !== assignedCityId) {
+      setSelectedBranchId(null);
+      writeStoredLocation(assignedCityId, null);
+    }
+  }, [assignedCityId, branches, selectedBranchId, selectedCityId, userRole]);
+
   const scopedSales = useMemo(() => {
-    const cityBranchIds = selectedCityId
-      ? branches.filter((branch) => branch.cityId === selectedCityId).map((branch) => branch.id)
-      : [];
+    const cityId = userRole === UserRole.CITY_MANAGER
+      ? (assignedCityId || selectedCityId)
+      : selectedCityId;
+    const cityBranchIds = (userRole === UserRole.CITY_MANAGER ? workspace.branches : branches)
+      .filter((branch) => !cityId || branch.cityId === cityId)
+      .map((branch) => branch.id);
 
     return sales.filter((sale) => {
       if (!sale.branchId) return isDemoSession || !selectedBranchId;
       if (selectedBranchId) return sale.branchId === selectedBranchId;
-      if (selectedCityId) return cityBranchIds.includes(sale.branchId);
-      return true;
+      if (cityId) return cityBranchIds.includes(sale.branchId);
+      return userRole !== UserRole.CITY_MANAGER;
     });
-  }, [sales, selectedBranchId, selectedCityId, branches, isDemoSession]);
+  }, [assignedCityId, branches, isDemoSession, sales, selectedBranchId, selectedCityId, userRole, workspace.branches]);
 
-  const selectedBranch = branches.find((branch) => branch.id === selectedBranchId) ?? null;
-  const selectedCity = cities.find((city) => city.id === (selectedCityId ?? selectedBranch?.cityId)) ?? null;
+  const selectedBranch = workspace.branches.find((branch) => branch.id === selectedBranchId)
+    ?? branches.find((branch) => branch.id === selectedBranchId)
+    ?? null;
+  const selectedCity = workspace.cities.find((city) => city.id === (selectedCityId ?? selectedBranch?.cityId))
+    ?? cities.find((city) => city.id === (selectedCityId ?? selectedBranch?.cityId))
+    ?? null;
   const shopIdentity: ShopIdentity = {
     name: selectedBranch ? `${SHOP_NAME} — ${selectedBranch.name}` : SHOP_NAME,
     address: selectedBranch?.address || selectedCity?.name || SHOP_ADDRESS,
     phone: selectedBranch?.phone || SHOP_PHONE,
   };
 
+  const dashboardCityId = userRole === UserRole.CITY_MANAGER
+    ? (assignedCityId || selectedCityId)
+    : selectedCityId;
+
   const branchSummaries = useMemo(() => {
-    const scopedBranches = selectedCityId
-      ? branches.filter((branch) => branch.cityId === selectedCityId)
-      : branches;
-    if (selectedBranchId || scopedBranches.length <= 1) return [];
+    const scopedBranches = userRole === UserRole.CITY_MANAGER
+      ? workspace.branches
+      : dashboardCityId
+        ? branches.filter((branch) => branch.cityId === dashboardCityId)
+        : branches;
+    if (userRole !== UserRole.CITY_MANAGER && (selectedBranchId || scopedBranches.length <= 1)) return [];
+    if (userRole === UserRole.CITY_MANAGER && scopedBranches.length === 0) return [];
     return scopedBranches.map((branch) => {
       const branchSales = sales.filter((sale) => sale.branchId === branch.id);
       return {
         id: branch.id,
         name: branch.name,
-        cityName: cities.find((city) => city.id === branch.cityId)?.name || '',
+        cityName: (workspace.cities.find((city) => city.id === branch.cityId)
+          ?? cities.find((city) => city.id === branch.cityId))?.name || '',
         sales: branchSales.reduce((sum, sale) => sum + sale.total, 0),
         orders: branchSales.length,
       };
     });
-  }, [branches, cities, sales, selectedBranchId, selectedCityId]);
+  }, [branches, cities, sales, selectedBranchId, userRole, dashboardCityId, workspace.branches, workspace.cities]);
 
+  const dashboardCity = workspace.cities.find((city) => city.id === dashboardCityId)
+    ?? cities.find((city) => city.id === dashboardCityId)
+    ?? selectedCity;
   const locationLabel = selectedBranch
-    ? `${selectedCity?.name || 'City'} · ${selectedBranch.name}`
-    : selectedCity
-      ? `${selectedCity.name} · All branches`
-      : 'All cities';
+    ? `${dashboardCity?.name || selectedCity?.name || 'City'} · ${selectedBranch.name}`
+    : dashboardCity
+      ? `${dashboardCity.name} · All branches`
+      : userRole === UserRole.CITY_MANAGER
+        ? 'Your city'
+        : 'All cities';
 
   const salesTodayTotal = useMemo(() => {
     const now = new Date();
@@ -916,9 +1009,9 @@ const App: React.FC = () => {
   };
 
   const handleLogin = (profile: SessionProfile, isDemo = false) => {
+    applyCachedData(readCachedAppData());
     if (isDemo) {
       sessionStorage.setItem(DEMO_AUTH_STORAGE_KEY, JSON.stringify(profile));
-      applyCachedData(readCachedAppData());
       setCities(DEMO_CITIES);
       setBranches(DEMO_BRANCHES);
     } else {
@@ -929,9 +1022,7 @@ const App: React.FC = () => {
     setIsLoggedIn(true);
     setIsAuthLoading(false);
     setCurrentView(defaultLandingView(profile.role));
-    if (canSwitchLocation(profile.role) && !readStoredLocation()) {
-      setShowLocationPicker(true);
-    }
+    setShowLocationPicker(false);
   };
 
   const requireBillingBranch = currentView === ViewState.BILLING && canAccessBilling(userRole ?? UserRole.EMPLOYEE);
@@ -941,10 +1032,22 @@ const App: React.FC = () => {
       setShowLocationPicker(true);
       return;
     }
-    setSelectedCityId(selection.cityId);
-    setSelectedBranchId(selection.branchId);
-    writeStoredLocation(selection.cityId, selection.branchId);
+    const cityId = userRole === UserRole.CITY_MANAGER ? (assignedCityId || selection.cityId) : selection.cityId;
+    const allowedBranchIds = (userRole === UserRole.CITY_MANAGER ? workspace.branches : branches).map((branch) => branch.id);
+    const branchId = selection.branchId && allowedBranchIds.includes(selection.branchId) ? selection.branchId : null;
+    setSelectedCityId(cityId);
+    setSelectedBranchId(branchId);
+    writeStoredLocation(cityId, branchId);
     setShowLocationPicker(false);
+  };
+
+  const handleSelectWorkspaceBranch = (branchId: string | null) => {
+    const cityId = userRole === UserRole.CITY_MANAGER ? assignedCityId : selectedCityId;
+    const allowed = workspace.branches.some((branch) => branch.id === branchId);
+    const nextBranchId = branchId && allowed ? branchId : null;
+    setSelectedCityId(cityId);
+    setSelectedBranchId(nextBranchId);
+    writeStoredLocation(cityId, nextBranchId);
   };
 
   const handleCancelLocation = () => {
@@ -973,8 +1076,8 @@ const App: React.FC = () => {
     return (
       <LocationPicker
         role={userRole}
-        cities={cities}
-        branches={branches}
+        cities={workspace.cities}
+        branches={workspace.branches}
         assignedCityId={assignedCityId}
         assignedBranchId={assignedBranchId}
         initialCityId={selectedCityId}
@@ -997,14 +1100,9 @@ const App: React.FC = () => {
       currentView={currentView}
       fillViewport={currentView === ViewState.BILLING}
       onChangeView={setCurrentView}
-      onLogout={async () => {
-        try {
-          sessionStorage.removeItem(DEMO_AUTH_STORAGE_KEY);
-          sessionStorage.removeItem(LOCATION_STORAGE_KEY);
-          if (supabase) await supabaseSignOut();
-        } catch (err) {
-          console.warn('Sign-out failed:', err);
-        }
+      onLogout={() => {
+        sessionStorage.removeItem(DEMO_AUTH_STORAGE_KEY);
+        sessionStorage.removeItem(LOCATION_STORAGE_KEY);
         clearAppDataCache();
         setIsLoggedIn(false);
         setUserRole(null);
@@ -1014,15 +1112,19 @@ const App: React.FC = () => {
         setSelectedBranchId(null);
         setShowLocationPicker(false);
         setIsDemoSession(false);
+        if (supabase) {
+          supabaseSignOut().catch((err) => console.warn('Sign-out failed:', err));
+        }
       }}
       notifications={notifications}
       userRole={userRole ?? UserRole.SUPER_ADMIN}
       locationLabel={locationLabel}
-      cities={cities}
-      branches={branches}
+      cities={workspace.cities}
+      branches={workspace.branches}
       selectedCityId={selectedCityId}
       selectedBranchId={selectedBranchId}
       onChangeLocation={canSwitchLocation(userRole ?? UserRole.SUPER_ADMIN) ? () => setShowLocationPicker(true) : undefined}
+      onSelectWorkspaceBranch={canSwitchWorkspaceBranch(userRole ?? UserRole.SUPER_ADMIN) ? handleSelectWorkspaceBranch : undefined}
     >
       {isSyncingData && products.length === 0 && (
         <div className="mx-3 sm:mx-4 md:mx-6 mt-2 rounded-xl border border-[var(--brand-border)] bg-[var(--brand-surface)] px-4 py-2 text-sm text-[var(--brand-dark)] flex items-center gap-2">
@@ -1046,6 +1148,8 @@ const App: React.FC = () => {
               dailyStats={MOCK_DAILY_STATS}
               locationLabel={locationLabel}
               branchSummaries={branchSummaries}
+              selectedBranchId={selectedBranchId}
+              onSelectBranch={canSwitchWorkspaceBranch(userRole ?? UserRole.SUPER_ADMIN) ? handleSelectWorkspaceBranch : undefined}
             />
           )
         )}
@@ -1082,8 +1186,8 @@ const App: React.FC = () => {
             actorRole={userRole}
             assignedCityId={assignedCityId}
             assignedBranchId={assignedBranchId}
-            cities={cities}
-            branches={branches}
+            cities={workspace.cities}
+            branches={workspace.branches}
           />
         )}
         {currentView === ViewState.INVENTORY && (
