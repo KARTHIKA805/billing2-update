@@ -17,7 +17,7 @@ import {
     MapPin
 } from 'lucide-react';
 import { Tag } from 'lucide-react';
-import { ROLE_INITIALS, ROLE_LABELS, canAccessBilling, canEditCategories, canManageLocations, canManageUsers, canSwitchLocation } from '../utils/access';
+import { ROLE_LABELS, canAccessBilling, canEditCategories, canManageLocations, canManageUsers, canSwitchLocation } from '../utils/access';
 
 interface LayoutProps {
     currentView: ViewState;
@@ -33,6 +33,7 @@ interface LayoutProps {
     selectedCityId?: string | null;
     selectedBranchId?: string | null;
     onChangeLocation?: () => void;
+    onSelectWorkspaceBranch?: (branchId: string | null) => void;
 }
 
 const Layout: React.FC<LayoutProps> = ({
@@ -44,7 +45,12 @@ const Layout: React.FC<LayoutProps> = ({
     userRole,
     fillViewport = false,
     locationLabel,
+    cities = [],
+    branches = [],
+    selectedCityId,
+    selectedBranchId,
     onChangeLocation,
+    onSelectWorkspaceBranch,
 }) => {
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
     const [showNotifications, setShowNotifications] = useState(false);
@@ -222,21 +228,6 @@ const Layout: React.FC<LayoutProps> = ({
                         />
                     ))}
                 </nav>
-
-                <div className={`border-t border-[var(--brand-border)] ${isSidebarCollapsed ? 'p-2' : 'p-4'}`}>
-                    <button
-                        type="button"
-                        onClick={onLogout}
-                        title={isSidebarCollapsed ? 'Sign Out' : undefined}
-                        aria-label="Sign Out"
-                        className={`flex items-center w-full rounded-xl text-[var(--brand-text-light)] hover:bg-[var(--brand-surface)] hover:text-[var(--brand-dark)] transition-colors duration-150 ${
-                            isSidebarCollapsed ? 'justify-center px-0 py-3' : 'gap-3 px-4 py-3'
-                        }`}
-                    >
-                        <LogOut size={20} className="shrink-0" />
-                        {!isSidebarCollapsed && <span>Sign Out</span>}
-                    </button>
-                </div>
             </aside>
 
             {/* Mobile Menu Overlay */}
@@ -283,20 +274,6 @@ const Layout: React.FC<LayoutProps> = ({
                         />
                     ))}
                 </nav>
-
-                <div className="p-3 border-t border-[var(--brand-border)]">
-                    <button
-                        type="button"
-                        onClick={() => {
-                            closeMobileMenu();
-                            onLogout();
-                        }}
-                        className="mobile-nav-item"
-                    >
-                        <LogOut size={20} />
-                        <span>Sign Out</span>
-                    </button>
-                </div>
             </aside>
 
             {/* Main Content */}
@@ -328,18 +305,41 @@ const Layout: React.FC<LayoutProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2 sm:gap-4 shrink-0">
-                        {locationLabel && (
+                        {onSelectWorkspaceBranch && branches.length > 0 ? (
+                            <label className="inline-flex items-center gap-1.5 max-w-[9rem] xs:max-w-[12rem] sm:max-w-[16rem] px-2 sm:px-3 py-1.5 rounded-full border border-[var(--brand-border)] bg-[var(--brand-muted)] text-xs font-medium text-[var(--brand-dark)]">
+                                <MapPin size={14} className="shrink-0" />
+                                <select
+                                    value={selectedBranchId || 'all'}
+                                    onChange={(event) => {
+                                        const value = event.target.value;
+                                        onSelectWorkspaceBranch(value === 'all' ? null : value);
+                                    }}
+                                    className="bg-transparent text-[var(--brand-dark)] font-medium truncate outline-none max-w-[7rem] sm:max-w-[13rem] cursor-pointer"
+                                    title="Your city branches"
+                                    aria-label="Your city branches"
+                                >
+                                    <option value="all">
+                                        {cities.find((city) => city.id === selectedCityId)?.name || 'City'} · All branches
+                                    </option>
+                                    {branches.map((branch) => (
+                                        <option key={branch.id} value={branch.id}>
+                                            {(cities.find((city) => city.id === branch.cityId)?.name || 'City')} · {branch.name}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                        ) : locationLabel ? (
                             <button
                                 type="button"
                                 onClick={onChangeLocation}
                                 disabled={!onChangeLocation}
-                                className="inline-flex items-center gap-1.5 max-w-[9rem] sm:max-w-[14rem] px-2.5 sm:px-3 py-1.5 rounded-full border border-[var(--brand-border)] bg-[var(--brand-muted)] text-xs font-medium text-[var(--brand-dark)] disabled:cursor-default"
+                                className="inline-flex items-center gap-1.5 max-w-[6.5rem] xs:max-w-[9rem] sm:max-w-[14rem] px-2 sm:px-3 py-1.5 rounded-full border border-[var(--brand-border)] bg-[var(--brand-muted)] text-xs font-medium text-[var(--brand-dark)] disabled:cursor-default"
                                 title={canSwitchLocation(userRole) ? 'Switch city or branch' : locationLabel}
                             >
-                                <MapPin size={14} />
+                                <MapPin size={14} className="shrink-0" />
                                 <span className="truncate">{locationLabel}</span>
                             </button>
-                        )}
+                        ) : null}
                         <div className="relative">
                             <button
                                 type="button"
@@ -373,9 +373,16 @@ const Layout: React.FC<LayoutProps> = ({
                                 </div>
                             )}
                         </div>
-                        <div className="h-8 w-8 bg-[var(--brand-accent)] rounded-full flex items-center justify-center text-[var(--brand-dark)] font-bold text-sm border border-[var(--brand-border)]">
-                            {ROLE_INITIALS[userRole]}
-                        </div>
+                        <button
+                            type="button"
+                            onClick={onLogout}
+                            className="inline-flex items-center gap-1.5 shrink-0 rounded-full bg-[var(--brand-dark)] px-2.5 sm:px-3 py-2 text-[var(--brand-text-light)] hover:bg-[var(--brand-accent)] hover:text-[var(--brand-dark)] transition-colors"
+                            aria-label="Sign out"
+                            title="Sign out"
+                        >
+                            <LogOut size={16} />
+                            <span className="text-xs font-semibold">Sign out</span>
+                        </button>
                     </div>
                 </header>
 

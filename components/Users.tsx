@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Search, UserPlus, Trash2, Eye, EyeOff, X, AlertCircle, Check, Info, Shield, User } from 'lucide-react';
-import { getAdminUsers, createAdminUser, deleteAdminUser } from '../services/supabaseService';
+import { Search, UserPlus, Trash2, Eye, EyeOff, X, AlertCircle, Check, Info, Shield, User, Pencil } from 'lucide-react';
+import { getAdminUsers, createAdminUser, deleteAdminUser, updateAdminUserLocation } from '../services/supabaseService';
 import { Branch, City, UserRole } from '../types';
-import { ROLE_LABELS, creatableRoles, normalizeUserRole, roleRequiresBranch, roleRequiresCity } from '../utils/access';
+import { ROLE_LABELS, creatableRoles, getRoleDescription, normalizeRoleLocation, normalizeUserRole, roleRequiresBranch, roleRequiresCity, validateRoleLocation } from '../utils/access';
+import { resolveCityId, resolveBranchId } from '../utils/locations';
 
 interface AdminUser {
   id: string;
@@ -45,6 +46,8 @@ const Users: React.FC<UsersProps> = ({
   const [warning, setWarning] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
+  const [editLocation, setEditLocation] = useState({ cityId: '', branchId: '' });
 
   // Form state
   const allowedRoles = creatableRoles(actorRole);
@@ -69,9 +72,15 @@ const Users: React.FC<UsersProps> = ({
       setUsers(data.map((user: any) => ({
         id: user.id,
         email: user.email,
-        role: user.user_metadata?.role || 'employee',
-        cityId: user.user_metadata?.city_id ?? null,
-        branchId: user.user_metadata?.branch_id ?? null,
+        role: user.user_metadata?.role || user.role || 'employee',
+        cityId: resolveCityId(user.user_metadata?.city_id ?? user.city_id ?? null, cities)
+          ?? user.user_metadata?.city_id
+          ?? user.city_id
+          ?? null,
+        branchId: resolveBranchId(user.user_metadata?.branch_id ?? user.branch_id ?? null, branches)
+          ?? user.user_metadata?.branch_id
+          ?? user.branch_id
+          ?? null,
         created_at: user.created_at,
         last_sign_in_at: user.last_sign_in_at ?? null,
       })));
@@ -101,14 +110,16 @@ const Users: React.FC<UsersProps> = ({
     }
 
     const nextRole = normalizeUserRole(newUser.role);
-    const nextCityId = assignedCityId || newUser.cityId || null;
-    const nextBranchId = assignedBranchId || newUser.branchId || null;
-    if (roleRequiresCity(nextRole) && !nextCityId) {
-      setError('Select a city for this role.');
-      return;
-    }
-    if (roleRequiresBranch(nextRole) && !nextBranchId) {
-      setError('Select a branch for this role.');
+    const location = normalizeRoleLocation(
+      nextRole,
+      assignedCityId || newUser.cityId || null,
+      assignedBranchId || newUser.branchId || null,
+      cities,
+      branches,
+    );
+    const locationError = validateRoleLocation(nextRole, location);
+    if (locationError) {
+      setError(locationError);
       return;
     }
 
@@ -116,8 +127,8 @@ const Users: React.FC<UsersProps> = ({
     try {
       const res: any = await createAdminUser(newUser.email, newUser.password, {
         role: nextRole,
-        cityId: nextCityId,
-        branchId: nextBranchId,
+        cityId: location.cityId,
+        branchId: location.branchId,
       });
       const signInTest = res?.signInTest;
 
@@ -185,19 +196,63 @@ const Users: React.FC<UsersProps> = ({
     }
   };
 
-  // Filter users
-  const locationName = (cityId?: string | null, branchId?: string | null) => {
-    const city = cities.find((item) => item.id === cityId)?.name;
-    const branch = branches.find((item) => item.id === branchId)?.name;
-    if (city && branch) return `${city} · ${branch}`;
-    if (city) return city;
-    return 'All locations';
+  const handleSaveLocation = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingUser) return;
+    const nextRole = normalizeUserRole(editingUser.role);
+    const location = normalizeRoleLocation(
+      nextRole,
+      editLocation.cityId,
+      editLocation.branchId,
+      cities,
+      branches,
+    );
+    const locationError = validateRoleLocation(nextRole, location);
+    if (locationError) {
+      setError(locationError);
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      await updateAdminUserLocation(editingUser.id, {
+        role: nextRole,
+        cityId: location.cityId,
+        branchId: location.branchId,
+      });
+      setSuccess(`Location updated for ${editingUser.email}.`);
+      setEditingUser(null);
+      await loadUsers();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to update location');
+    } finally {
+      setLoading(false);
+    }
   };
+
+  const locationName = (cityId?: string | null, branchId?: string | null, role?: string) => {
+    const resolvedCityId = resolveCityId(cityId, cities) ?? cityId;
+    const resolvedBranchId = resolveBranchId(branchId, branches) ?? branchId;
+    const city = cities.find((item) => item.id === resolvedCityId)?.name;
+    const branch = branches.find((item) => item.id === resolvedBranchId)?.name;
+    if (city && branch) return `${city} · ${branch}`;
+    if (city) {
+      return normalizeUserRole(role) === UserRole.CITY_MANAGER
+        ? `${city} · All branches`
+        : city;
+    }
+    return normalizeUserRole(role) === UserRole.SUPER_ADMIN ? 'All locations' : 'No location assigned';
+  };
+
+  const selectedCityBranches = branches.filter((branch) => {
+    const cityId = assignedCityId || newUser.cityId;
+    return cityId && branch.cityId === cityId;
+  });
 
   const filteredUsers = users.filter((user) => {
     if (!user.email.toLowerCase().includes(searchTerm.toLowerCase())) return false;
     if (actorRole === UserRole.CITY_MANAGER && assignedCityId) {
-      return !user.cityId || user.cityId === assignedCityId;
+      return user.cityId === assignedCityId;
     }
     if (actorRole === UserRole.BRANCH_ADMIN && assignedBranchId) {
       return !user.branchId || user.branchId === assignedBranchId;
@@ -213,7 +268,9 @@ const Users: React.FC<UsersProps> = ({
         <div>
           <p className="font-medium text-[var(--brand-dark)]">User Management</p>
           <p className="text-sm text-[var(--brand-border)] mt-1">
-            Create staff for your scope: Super Admin (all cities), City Manager (one city), Branch Admin (one outlet), Employee (counter).
+            {actorRole === UserRole.CITY_MANAGER
+              ? 'Staff for this city only. Branch options are limited to your city’s outlets.'
+              : 'Create staff for your scope: Super Admin (all cities), City Manager (one city), Branch Admin (one outlet), Employee (counter).'}
           </p>
         </div>
       </div>
@@ -311,7 +368,7 @@ const Users: React.FC<UsersProps> = ({
                     </td>
                     <td className="px-6 py-4">
                       <span className="text-[var(--brand-border)] text-sm">
-                        {locationName(user.cityId, user.branchId)}
+                        {locationName(user.cityId, user.branchId, user.role)}
                       </span>
                     </td>
                     <td className="px-6 py-4">
@@ -344,12 +401,30 @@ const Users: React.FC<UsersProps> = ({
                           </button>
                         </div>
                       ) : (
-                        <button
-                          onClick={() => setDeleteConfirm(user.id)}
-                          className="p-2 text-[var(--brand-dark)] hover:bg-[var(--brand-muted)] rounded-lg transition-colors"
-                        >
-                          <Trash2 size={18} />
-                        </button>
+                        <div className="flex items-center justify-end gap-1">
+                          {actorRole === UserRole.SUPER_ADMIN && normalizeUserRole(user.role) !== UserRole.SUPER_ADMIN && (
+                            <button
+                              onClick={() => {
+                                setError('');
+                                setEditingUser(user);
+                                setEditLocation({
+                                  cityId: user.cityId || '',
+                                  branchId: user.branchId || '',
+                                });
+                              }}
+                              className="p-2 text-[var(--brand-dark)] hover:bg-[var(--brand-muted)] rounded-lg transition-colors"
+                              title="Assign city or branch"
+                            >
+                              <Pencil size={18} />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => setDeleteConfirm(user.id)}
+                            className="p-2 text-[var(--brand-dark)] hover:bg-[var(--brand-muted)] rounded-lg transition-colors"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -422,12 +497,18 @@ const Users: React.FC<UsersProps> = ({
                     <button
                       key={role}
                       type="button"
-                      onClick={() => setNewUser({
-                        ...newUser,
-                        role,
-                        cityId: assignedCityId || newUser.cityId,
-                        branchId: roleRequiresBranch(role) ? (assignedBranchId || newUser.branchId) : '',
-                      })}
+                      onClick={() => {
+                        const cityId = assignedCityId || newUser.cityId;
+                        const cityBranches = cityId ? branches.filter((branch) => branch.cityId === cityId) : [];
+                        setNewUser({
+                          ...newUser,
+                          role,
+                          cityId,
+                          branchId: roleRequiresBranch(role)
+                            ? (assignedBranchId || (cityBranches.length === 1 ? cityBranches[0].id : newUser.branchId))
+                            : '',
+                        });
+                      }}
                       className={`flex items-center gap-2 px-4 py-3 rounded-xl border transition-all text-left ${
                         newUser.role === role
                           ? 'border-[var(--brand-border)] bg-[var(--brand-muted)] text-[var(--brand-dark)] ring-2 ring-[var(--brand-accent)]/20'
@@ -449,7 +530,17 @@ const Users: React.FC<UsersProps> = ({
                   <select
                     value={assignedCityId || newUser.cityId}
                     disabled={!!assignedCityId}
-                    onChange={(event) => setNewUser({ ...newUser, cityId: event.target.value, branchId: '' })}
+                    onChange={(event) => {
+                      const cityId = event.target.value;
+                      const cityBranches = cityId ? branches.filter((branch) => branch.cityId === cityId) : [];
+                      setNewUser({
+                        ...newUser,
+                        cityId,
+                        branchId: roleRequiresBranch(normalizeUserRole(newUser.role))
+                          ? (assignedBranchId || (cityBranches.length === 1 ? cityBranches[0].id : ''))
+                          : '',
+                      });
+                    }}
                     className="w-full px-4 py-2.5 rounded-xl border border-[var(--brand-border)] bg-white text-[var(--brand-text-dark)]"
                   >
                     <option value="">Select city</option>
@@ -459,6 +550,13 @@ const Users: React.FC<UsersProps> = ({
                         <option key={city.id} value={city.id}>{city.name}</option>
                       ))}
                   </select>
+                  {selectedCityBranches.length > 0 && (
+                    <p className="text-xs text-[var(--brand-border)] mt-2">
+                      {normalizeUserRole(newUser.role) === UserRole.CITY_MANAGER
+                        ? `This city manager will see: ${selectedCityBranches.map((branch) => branch.name).join(', ')}.`
+                        : `Branches in this city: ${selectedCityBranches.map((branch) => branch.name).join(', ')}.`}
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -468,7 +566,15 @@ const Users: React.FC<UsersProps> = ({
                   <select
                     value={assignedBranchId || newUser.branchId}
                     disabled={!!assignedBranchId}
-                    onChange={(event) => setNewUser({ ...newUser, branchId: event.target.value })}
+                    onChange={(event) => {
+                      const branchId = event.target.value;
+                      const branch = branches.find((item) => item.id === branchId);
+                      setNewUser({
+                        ...newUser,
+                        branchId,
+                        cityId: assignedCityId || branch?.cityId || newUser.cityId,
+                      });
+                    }}
                     className="w-full px-4 py-2.5 rounded-xl border border-[var(--brand-border)] bg-white text-[var(--brand-text-dark)]"
                   >
                     <option value="">Select branch</option>
@@ -487,7 +593,7 @@ const Users: React.FC<UsersProps> = ({
 
               <div className="bg-[var(--brand-muted)] border border-[var(--brand-border)] p-3 rounded-lg">
                 <p className="text-xs text-[var(--brand-border)]">
-                  {ROLE_LABELS[normalizeUserRole(newUser.role)]} accounts stay inside the city or branch you assign here.
+                  {getRoleDescription(normalizeUserRole(newUser.role))}
                 </p>
               </div>
 
@@ -505,6 +611,89 @@ const Users: React.FC<UsersProps> = ({
                   className="flex-1 px-4 py-2.5 bg-[var(--brand-dark)] text-[var(--brand-text-light)] rounded-xl hover:bg-[var(--brand-bg)] font-medium transition-colors disabled:opacity-50"
                 >
                   {loading ? 'Creating...' : 'Create User'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {editingUser && (
+        <div className="fixed inset-0 bg-[var(--brand-dark)]/20 flex items-center justify-center p-4 z-50">
+          <div className="bg-[var(--brand-surface)] rounded-2xl shadow-xl max-w-md w-full p-6 border border-[var(--brand-border)]">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-bold text-[var(--brand-dark)]">Assign location</h2>
+              <button
+                onClick={() => setEditingUser(null)}
+                className="p-2 hover:bg-[var(--brand-muted)] rounded-lg transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <p className="text-sm text-[var(--brand-border)] mb-4">
+              {editingUser.email} · {ROLE_LABELS[normalizeUserRole(editingUser.role)]}
+            </p>
+            <form onSubmit={handleSaveLocation} className="space-y-4">
+              {roleRequiresCity(normalizeUserRole(editingUser.role)) && (
+                <div>
+                  <label className="block text-sm font-medium text-[var(--brand-dark)] mb-2">City</label>
+                  <select
+                    value={editLocation.cityId}
+                    onChange={(event) => setEditLocation({ cityId: event.target.value, branchId: '' })}
+                    className="w-full px-4 py-2.5 rounded-xl border border-[var(--brand-border)] bg-white text-[var(--brand-text-dark)]"
+                  >
+                    <option value="">Select city</option>
+                    {cities.map((city) => (
+                      <option key={city.id} value={city.id}>{city.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {roleRequiresBranch(normalizeUserRole(editingUser.role)) && (
+                <div>
+                  <label className="block text-sm font-medium text-[var(--brand-dark)] mb-2">Branch</label>
+                  <select
+                    value={editLocation.branchId}
+                    onChange={(event) => {
+                      const branchId = event.target.value;
+                      const branch = branches.find((item) => item.id === branchId);
+                      setEditLocation({
+                        branchId,
+                        cityId: branch?.cityId || editLocation.cityId,
+                      });
+                    }}
+                    className="w-full px-4 py-2.5 rounded-xl border border-[var(--brand-border)] bg-white text-[var(--brand-text-dark)]"
+                  >
+                    <option value="">Select branch</option>
+                    {branches
+                      .filter((branch) => !editLocation.cityId || branch.cityId === editLocation.cityId)
+                      .map((branch) => (
+                        <option key={branch.id} value={branch.id}>{branch.name}</option>
+                      ))}
+                  </select>
+                </div>
+              )}
+              {normalizeUserRole(editingUser.role) === UserRole.CITY_MANAGER && (
+                <p className="text-xs text-[var(--brand-border)]">
+                  {branches.filter((branch) => branch.cityId === editLocation.cityId).length > 0
+                    ? `Branches in this city: ${branches.filter((branch) => branch.cityId === editLocation.cityId).map((branch) => branch.name).join(', ')}.`
+                    : 'Select Coimbatore to assign RS Puram and Peelamedu.'}
+                </p>
+              )}
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingUser(null)}
+                  className="flex-1 px-4 py-2.5 border border-[var(--brand-border)] text-[var(--brand-dark)] rounded-xl hover:bg-[var(--brand-muted)] font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="flex-1 px-4 py-2.5 bg-[var(--brand-dark)] text-[var(--brand-text-light)] rounded-xl font-medium disabled:opacity-50"
+                >
+                  {loading ? 'Saving...' : 'Save location'}
                 </button>
               </div>
             </form>

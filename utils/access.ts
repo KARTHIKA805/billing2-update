@@ -1,4 +1,5 @@
 import { UserRole, ViewState } from '../types';
+import { resolveBranchId, resolveCityId } from './locations';
 
 export const ROLE_LABELS: Record<UserRole, string> = {
   [UserRole.EMPLOYEE]: 'Employee',
@@ -37,8 +38,47 @@ export const canEditInventory = (role: UserRole) => isAtLeast(role, UserRole.BRA
 export const canEditCategories = (role: UserRole) => role === UserRole.SUPER_ADMIN;
 export const canManageLocations = (role: UserRole) => role === UserRole.SUPER_ADMIN;
 export const canEditBills = (role: UserRole) => isAtLeast(role, UserRole.BRANCH_ADMIN);
-export const canSwitchLocation = (role: UserRole) => isAtLeast(role, UserRole.CITY_MANAGER);
-export const canAccessBilling = (role: UserRole) => role !== UserRole.SUPER_ADMIN;
+export const canSwitchLocation = (role: UserRole) => role === UserRole.SUPER_ADMIN;
+export const canSwitchWorkspaceBranch = (role: UserRole) => role === UserRole.CITY_MANAGER;
+export const canAccessBilling = (role: UserRole) =>
+  role === UserRole.EMPLOYEE || role === UserRole.BRANCH_ADMIN;
+
+export const scopeWorkspaceLocations = <
+  C extends { id: string },
+  B extends { id: string; cityId: string }
+>(
+  role: UserRole,
+  cities: C[],
+  branches: B[],
+  assignedCityId?: string | null,
+  assignedBranchId?: string | null,
+): { cities: C[]; branches: B[] } => {
+  if (role === UserRole.SUPER_ADMIN) {
+    return { cities, branches };
+  }
+
+  const scopedCities = assignedCityId
+    ? cities.filter((city) => city.id === assignedCityId)
+    : [];
+
+  if (role === UserRole.CITY_MANAGER) {
+    return {
+      cities: scopedCities,
+      branches: assignedCityId
+        ? branches.filter((branch) => branch.cityId === assignedCityId)
+        : [],
+    };
+  }
+
+  return {
+    cities: scopedCities,
+    branches: assignedBranchId
+      ? branches.filter((branch) => branch.id === assignedBranchId)
+      : assignedCityId
+        ? branches.filter((branch) => branch.cityId === assignedCityId)
+        : [],
+  };
+};
 
 export const defaultLandingView = (role: UserRole): ViewState => (
   role === UserRole.EMPLOYEE ? ViewState.BILLING : ViewState.DASHBOARD
@@ -58,12 +98,55 @@ export const roleRequiresBranch = (role: UserRole) => (
   role === UserRole.BRANCH_ADMIN || role === UserRole.EMPLOYEE
 );
 
+type LocationCity = { id: string; name?: string };
+type LocationBranch = { id: string; name?: string; cityId: string };
+
+export const normalizeRoleLocation = (
+  role: UserRole,
+  cityId?: string | null,
+  branchId?: string | null,
+  cities: LocationCity[] = [],
+  branches: LocationBranch[] = [],
+): { cityId: string | null; branchId: string | null } => {
+  if (role === UserRole.SUPER_ADMIN) {
+    return { cityId: null, branchId: null };
+  }
+
+  const resolvedBranchId = resolveBranchId(branchId, branches) ?? (branchId || null);
+  const branch = resolvedBranchId
+    ? branches.find((item) => item.id === resolvedBranchId) ?? null
+    : null;
+  const resolvedCityId = resolveCityId(cityId, cities)
+    ?? branch?.cityId
+    ?? cityId
+    ?? null;
+
+  if (role === UserRole.CITY_MANAGER) {
+    return { cityId: resolvedCityId || null, branchId: null };
+  }
+
+  if (branch) {
+    return { cityId: branch.cityId, branchId: branch.id };
+  }
+
+  return { cityId: resolvedCityId || null, branchId: null };
+};
+
+export const validateRoleLocation = (
+  role: UserRole,
+  location: { cityId: string | null; branchId: string | null },
+): string | null => {
+  if (roleRequiresCity(role) && !location.cityId) return 'Select a city for this role.';
+  if (roleRequiresBranch(role) && !location.branchId) return 'Select a branch for this role.';
+  return null;
+};
+
 export const getRoleDescription = (role: UserRole) => {
   if (role === UserRole.SUPER_ADMIN) {
     return 'All cities and branches: dashboards, users, locations, and categories. No billing.';
   }
   if (role === UserRole.CITY_MANAGER) {
-    return 'One city: compare branches, open any outlet in that city, and manage its staff.';
+    return 'One city only: that city’s branches on the dashboard and throughout the workspace. No billing.';
   }
   if (role === UserRole.BRANCH_ADMIN) {
     return 'One branch: full dashboard, billing, inventory edits, and employee accounts.';

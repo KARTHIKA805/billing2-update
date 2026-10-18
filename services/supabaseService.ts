@@ -3,7 +3,7 @@ import { supabase, supabaseUrl, supabaseAnonKey } from './supabaseClient';
 export { supabase };
 import { Product, SaleRecord, Customer, CartItem, Category, Ingredient, InventoryAdjustment, UserRole, City, Branch, SessionProfile } from '../types';
 import { DEMO_BRANCHES, DEMO_CITIES, getCartLineId } from '../constants';
-import { normalizeUserRole } from '../utils/access';
+import { normalizeRoleLocation, normalizeUserRole, validateRoleLocation } from '../utils/access';
 import { isUuid, resolveBranchId, resolveCityId } from '../utils/locations';
 
 const parseUnitFromProductName = (productName: string, fallback = 'unit') => {
@@ -1289,14 +1289,22 @@ export const createAdminUser = async (email: string, password: string, userMetad
     });
 
     const role = normalizeUserRole(userMetadata?.role);
-    const cityId = resolveCityId(userMetadata?.cityId ?? userMetadata?.city_id ?? null);
-    const branchId = resolveBranchId(userMetadata?.branchId ?? userMetadata?.branch_id ?? null);
+    const [cities, branches] = await Promise.all([getCities(), getBranches()]);
+    const location = normalizeRoleLocation(
+        role,
+        userMetadata?.cityId ?? userMetadata?.city_id ?? null,
+        userMetadata?.branchId ?? userMetadata?.branch_id ?? null,
+        cities,
+        branches,
+    );
+    const locationError = validateRoleLocation(role, location);
+    if (locationError) throw new Error(locationError);
 
     const { data, error } = await isolated.auth.signUp({
         email,
         password,
         options: {
-            data: { ...(userMetadata || {}), role, city_id: cityId, branch_id: branchId },
+            data: { role, city_id: location.cityId, branch_id: location.branchId },
         },
     });
 
@@ -1306,10 +1314,37 @@ export const createAdminUser = async (email: string, password: string, userMetad
             id: data.user.id,
             email,
             role,
-            city_id: cityId,
-            branch_id: branchId,
+            city_id: location.cityId,
+            branch_id: location.branchId,
+            updated_at: new Date().toISOString(),
         };
-        await supabase.from('user_profiles').upsert(profilePayload);
+        const { error: profileError } = await supabase
+            .from('user_profiles')
+            .upsert(profilePayload, { onConflict: 'id' });
+        if (profileError) {
+            throw new Error(`User was created in Auth, but the profile location was not saved: ${profileError.message}`);
+        }
+
+        const { data: savedProfile } = await supabase
+            .from('user_profiles')
+            .select('city_id, branch_id')
+            .eq('id', data.user.id)
+            .maybeSingle();
+        const missingCity = Boolean(location.cityId) && savedProfile?.city_id !== location.cityId;
+        const missingBranch = Boolean(location.branchId) && savedProfile?.branch_id !== location.branchId;
+        if (missingCity || missingBranch) {
+            const { error: retryError } = await supabase
+                .from('user_profiles')
+                .update({
+                    city_id: location.cityId,
+                    branch_id: location.branchId,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', data.user.id);
+            if (retryError) {
+                throw new Error(`User was created, but the ${role.replace('_', ' ')} location was not saved: ${retryError.message}`);
+            }
+        }
     }
     // Attempt a client-side sign-in test for the newly created user using an
     // isolated Supabase client with noop storage to avoid interference with the
@@ -1342,6 +1377,28 @@ export const createAdminUser = async (email: string, password: string, userMetad
     }
 
     return { user: data.user, signInTest };
+};
+
+export const updateAdminUserLocation = async (
+    userId: string,
+    location: { role?: UserRole; cityId?: string | null; branchId?: string | null }
+) => {
+    if (!supabase) throw new Error('Supabase not initialized');
+    const role = location.role ? normalizeUserRole(location.role) : undefined;
+    const [cities, branches] = await Promise.all([getCities(), getBranches()]);
+    const normalized = normalizeRoleLocation(role ?? UserRole.EMPLOYEE, location.cityId, location.branchId, cities, branches);
+    if (role) {
+        const locationError = validateRoleLocation(role, normalized);
+        if (locationError) throw new Error(locationError);
+    }
+    const payload: Record<string, unknown> = {
+        city_id: normalized.cityId,
+        branch_id: normalized.branchId,
+        updated_at: new Date().toISOString(),
+    };
+    if (role) payload.role = role;
+    const { error } = await supabase.from('user_profiles').update(payload).eq('id', userId);
+    if (error) throw error;
 };
 
 export const deleteAdminUser = async (userId: string) => {

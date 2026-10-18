@@ -50,7 +50,14 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
   }, [cities, lockedCityId]);
 
   const defaultCityId = initialCityId ?? lockedCityId ?? (showAll ? ALL_VALUE : (visibleCities[0]?.id ?? ALL_VALUE));
-  const defaultBranchId = initialBranchId ?? assignedBranchId ?? (showAll ? ALL_VALUE : NONE_VALUE);
+  const cityBranches = useMemo(() => {
+    const selectedCity = (defaultCityId === ALL_VALUE ? lockedCityId : defaultCityId) ?? lockedCityId;
+    if (!selectedCity) return branches;
+    return branches.filter((branch) => branch.cityId === selectedCity);
+  }, [branches, defaultCityId, lockedCityId]);
+  const defaultBranchId = initialBranchId
+    ?? assignedBranchId
+    ?? (showAll ? ALL_VALUE : (cityBranches.length === 1 ? cityBranches[0].id : NONE_VALUE));
 
   const [cityId, setCityId] = useState(defaultCityId);
   const [branchId, setBranchId] = useState(defaultBranchId);

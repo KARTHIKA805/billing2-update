@@ -1,4 +1,4 @@
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const SEEDED_CITY_IDS = {
   chennai: '11111111-1111-1111-1111-111111111111',
@@ -16,6 +16,8 @@ const CITY_ID_ALIASES: Record<string, string> = {
   chennai: SEEDED_CITY_IDS.chennai,
   'city-coimbatore': SEEDED_CITY_IDS.coimbatore,
   coimbatore: SEEDED_CITY_IDS.coimbatore,
+  cbe: SEEDED_CITY_IDS.coimbatore,
+  'cbe city': SEEDED_CITY_IDS.coimbatore,
 };
 
 const BRANCH_ID_ALIASES: Record<string, string> = {
@@ -41,13 +43,15 @@ const resolveLocationId = (
 ) => {
   if (!value) return null;
   const records = locations.map((item) => (typeof item === 'string' ? { id: item } : item));
-  if (records.some((item) => item.id === value) && isUuid(value)) return value;
+  if (records.some((item) => item.id === value)) return value;
 
   const aliased = aliases[value] || aliases[value.trim().toLowerCase()];
-  if (aliased && records.some((item) => item.id === aliased)) return aliased;
+  if (aliased && (records.length === 0 || records.some((item) => item.id === aliased))) {
+    return aliased;
+  }
 
   const byName = records.find((item) => item.name && item.name.trim().toLowerCase() === value.trim().toLowerCase());
-  if (byName && isUuid(byName.id)) return byName.id;
+  if (byName) return byName.id;
 
   if (isUuid(value)) return value;
   return aliased && isUuid(aliased) ? aliased : null;
