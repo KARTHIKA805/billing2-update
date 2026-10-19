@@ -3,7 +3,7 @@ import { supabase, supabaseUrl, supabaseAnonKey } from './supabaseClient';
 export { supabase };
 import { Product, SaleRecord, Customer, CartItem, Category, Ingredient, InventoryAdjustment, UserRole, City, Branch, SessionProfile } from '../types';
 import { DEMO_BRANCHES, DEMO_CITIES, getCartLineId } from '../constants';
-import { normalizeRoleLocation, normalizeUserRole, validateRoleLocation } from '../utils/access';
+import { canAccessBilling, canAccessBranchData, canCreateStaffUser, canEditBills, normalizeRoleLocation, normalizeUserRole, validateRoleLocation } from '../utils/access';
 import { isUuid, resolveBranchId, resolveCityId } from '../utils/locations';
 
 const parseUnitFromProductName = (productName: string, fallback = 'unit') => {
@@ -238,49 +238,76 @@ export const resolveUserRoleFromMetadata = (user: any): UserRole | null => {
 };
 
 export const getSessionProfile = async (user: any): Promise<SessionProfile> => {
-    const metadataRole = resolveUserRoleFromMetadata(user) ?? UserRole.SUPER_ADMIN;
-    const fallback: SessionProfile = {
-        id: user?.id,
-        email: user?.email,
-        role: metadataRole,
-        cityId: user?.user_metadata?.city_id ?? user?.user_metadata?.cityId ?? null,
-        branchId: user?.user_metadata?.branch_id ?? user?.user_metadata?.branchId ?? null,
-    };
-
-    if (!user) return { role: UserRole.SUPER_ADMIN, cityId: null, branchId: null };
-    if (!supabase || !user.id) return fallback;
-
-    try {
-        const { data: profile, error: profileError } = await supabase
-            .from('user_profiles')
-            .select('id, email, role, city_id, branch_id')
-            .eq('id', user.id)
-            .maybeSingle();
-
-        if (profileError) {
-            if (!isMissingRelationError(profileError)) {
-                console.warn('Failed to verify user profile:', profileError);
-            }
-            return fallback;
-        }
-
-        if (!profile) {
-            await supabase.auth.signOut();
-            throw new Error('Your account has been deactivated. Please contact an administrator.');
-        }
-
-        return {
-            id: profile.id,
-            email: profile.email,
-            role: normalizeUserRole(profile.role),
-            cityId: profile.city_id ?? null,
-            branchId: profile.branch_id ?? null,
-        };
-    } catch (err: any) {
-        if (err?.message?.includes('deactivated')) throw err;
-        console.warn('Failed to resolve user profile:', err);
-        return fallback;
+    if (!user?.id) {
+        throw new Error('You are not signed in.');
     }
+    if (!supabase) {
+        throw new Error('Database connection not configured.');
+    }
+
+    const { data: profile, error: profileError } = await supabase
+        .from('user_profiles')
+        .select('id, email, role, city_id, branch_id')
+        .eq('id', user.id)
+        .maybeSingle();
+
+    if (profileError && !isMissingRelationError(profileError)) {
+        await supabase.auth.signOut().catch(() => undefined);
+        throw new Error('Unable to verify your account. Please sign in again.');
+    }
+
+    if (!profile) {
+        await supabase.auth.signOut().catch(() => undefined);
+        if (normalizeUserRole(user.user_metadata?.role) === UserRole.SUPER_ADMIN) {
+            throw new Error('The Super Admin profile is missing, so Users cannot load. Restore that user_profiles row, then sign in again.');
+        }
+        throw new Error('Your account has been deactivated. Please contact an administrator.');
+    }
+
+    return {
+        id: profile.id,
+        email: profile.email,
+        role: normalizeUserRole(profile.role),
+        cityId: profile.city_id ?? null,
+        branchId: profile.branch_id ?? null,
+    };
+};
+
+const getActorProfile = async (): Promise<SessionProfile> => {
+    if (!supabase) throw new Error('Supabase not initialized');
+    const { data, error } = await supabase.auth.getUser();
+    if (error || !data.user) throw new Error('Not authenticated');
+    return getSessionProfile(data.user);
+};
+
+const assertBranchAccess = async (branchId: string | null | undefined, mode: 'read' | 'bill' | 'edit') => {
+    const actor = await getActorProfile();
+    if (!branchId) {
+        if (actor.role !== UserRole.SUPER_ADMIN) throw new Error('Not authorized for this branch.');
+        return actor;
+    }
+    const { data, error } = await supabase!
+        .from('branches')
+        .select('id, city_id')
+        .eq('id', branchId)
+        .maybeSingle();
+    if (error) throw error;
+    const branch = data ? { id: data.id as string, cityId: data.city_id as string } : null;
+    if (!canAccessBranchData(actor, branch)) {
+        throw new Error('Not authorized for this branch.');
+    }
+    if (mode === 'bill' && (!canAccessBilling(actor.role) || actor.branchId !== branchId)) {
+        throw new Error('Not authorized to bill at this branch.');
+    }
+    if (mode === 'edit' && !canEditBills(actor.role)) {
+        throw new Error('Not authorized to edit bills.');
+    }
+    return actor;
+};
+
+const staffRpcUnavailable = (error: any) => {
+    const message = String(error?.message || error?.details || '');
+    return isMissingRelationError(error) || /could not find the function|function .* does not exist/i.test(message);
 };
 
 export const getUserRole = async (user: any): Promise<UserRole> => {
@@ -986,6 +1013,7 @@ export const createSale = async (sale: SaleRecord) => {
     if (!resolvedBranchId || !isUuid(resolvedBranchId)) {
         throw new Error('Select a branch before creating a bill.');
     }
+    await assertBranchAccess(resolvedBranchId, 'bill');
     salePayload.branch_id = resolvedBranchId;
 
     const { data: saleData, error: saleError } = await supabase.from('sales').insert(salePayload).select().single();
@@ -1143,6 +1171,8 @@ export const updateSale = async (sale: SaleRecord) => {
 
     const { data: existingSale } = await supabase.from('sales').select('branch_id').eq('id', sale.id).maybeSingle();
     const stockBranchId = resolveBranchId(sale.branchId) ?? existingSale?.branch_id ?? null;
+    if (existingSale?.branch_id) await assertBranchAccess(existingSale.branch_id, 'edit');
+    await assertBranchAccess(stockBranchId, 'edit');
 
     await adjustStockForItems(previousItems, 'restore', stockBranchId);
 
@@ -1231,26 +1261,67 @@ export const touchUserLastSignIn = async (userId: string) => {
     }
 };
 
+const mapAdminUser = (profile: any) => ({
+    id: profile.id,
+    email: profile.email,
+    user_metadata: {
+        role: profile.role,
+        city_id: profile.city_id ?? null,
+        branch_id: profile.branch_id ?? null,
+    },
+    created_at: profile.created_at,
+    last_sign_in_at: profile.last_sign_in_at ?? null,
+});
+
+const staffAccessMessage = (error: any) => {
+    const message = String(error?.message || '');
+    if (/jwt expired|not authenticated/i.test(message) || error?.status === 401) {
+        return 'Your sign-in expired. Sign in again, then open Users.';
+    }
+    if (/not authorized/i.test(message)) {
+        return 'This account cannot load the user list.';
+    }
+    return message || 'Failed to load users.';
+};
+
+const sessionForStaffRequest = async () => {
+    if (!supabase) throw new Error('Supabase not initialized');
+    const current = await supabase.auth.getSession();
+    if (current.data.session) return current.data.session;
+    const refreshed = await supabase.auth.refreshSession();
+    return refreshed.data.session ?? null;
+};
+
 export const getAdminUsers = async () => {
     if (!supabase) throw new Error('Supabase not initialized');
 
-    const { data: rpcData, error: rpcError } = await supabase.rpc('get_admin_users');
-    if (!rpcError && rpcData) {
-        return (rpcData || []).map((profile: any) => ({
-            id: profile.id,
-            email: profile.email,
-            user_metadata: {
-                role: profile.role,
-                city_id: profile.city_id ?? null,
-                branch_id: profile.branch_id ?? null,
-            },
-            created_at: profile.created_at,
-            last_sign_in_at: profile.last_sign_in_at ?? null,
-        }));
+    const session = await sessionForStaffRequest();
+    if (!session) {
+        throw new Error('Sign in with a staff email to manage users. The demo login has no database session.');
     }
 
-    if (rpcError) {
-        console.warn('get_admin_users RPC unavailable, falling back to user_profiles:', rpcError.message);
+    let { data: rpcData, error: rpcError } = await supabase.rpc('get_admin_users');
+    if (rpcError && (rpcError.status === 401 || /jwt expired|not authenticated/i.test(rpcError.message || ''))) {
+        const refreshed = await supabase.auth.refreshSession();
+        if (refreshed.data.session) {
+            const retry = await supabase.rpc('get_admin_users');
+            rpcData = retry.data;
+            rpcError = retry.error;
+        }
+    }
+    if (!rpcError && rpcData) {
+        return (rpcData || []).map(mapAdminUser);
+    }
+
+    if (rpcError && !staffRpcUnavailable(rpcError)) {
+        const fallback = await supabase
+            .from('user_profiles')
+            .select('*')
+            .order('created_at', { ascending: false });
+        if (!fallback.error && (fallback.data || []).length > 0) {
+            return (fallback.data || []).map(mapAdminUser);
+        }
+        throw new Error(staffAccessMessage(rpcError));
     }
 
     const { data, error } = await supabase
@@ -1258,17 +1329,7 @@ export const getAdminUsers = async () => {
         .select('*')
         .order('created_at', { ascending: false });
     if (error) throw error;
-    return (data || []).map((profile: any) => ({
-        id: profile.id,
-        email: profile.email,
-        user_metadata: {
-            role: profile.role,
-            city_id: profile.city_id ?? null,
-            branch_id: profile.branch_id ?? null,
-        },
-        created_at: profile.created_at,
-        last_sign_in_at: profile.last_sign_in_at ?? null,
-    }));
+    return (data || []).map(mapAdminUser);
 };
 
 export const createAdminUser = async (email: string, password: string, userMetadata?: any) => {
@@ -1299,6 +1360,20 @@ export const createAdminUser = async (email: string, password: string, userMetad
     );
     const locationError = validateRoleLocation(role, location);
     if (locationError) throw new Error(locationError);
+
+    const actor = await getActorProfile();
+    if (!canCreateStaffUser(actor, { role, cityId: location.cityId, branchId: location.branchId })) {
+        throw new Error('Not authorized to create this user.');
+    }
+
+    const { error: permissionError } = await supabase.rpc('assert_can_create_staff', {
+        p_role: role,
+        p_city_id: location.cityId,
+        p_branch_id: location.branchId,
+    });
+    if (permissionError && !staffRpcUnavailable(permissionError)) {
+        throw new Error(permissionError.message || 'Not authorized to create this user.');
+    }
 
     const { data, error } = await isolated.auth.signUp({
         email,
@@ -1384,37 +1459,78 @@ export const updateAdminUserLocation = async (
     location: { role?: UserRole; cityId?: string | null; branchId?: string | null }
 ) => {
     if (!supabase) throw new Error('Supabase not initialized');
+    const actor = await getActorProfile();
+    if (actor.role !== UserRole.SUPER_ADMIN) {
+        throw new Error('Not authorized to update user location.');
+    }
     const role = location.role ? normalizeUserRole(location.role) : undefined;
+    if (role === UserRole.SUPER_ADMIN) {
+        throw new Error('Super Admin accounts cannot be modified.');
+    }
     const [cities, branches] = await Promise.all([getCities(), getBranches()]);
     const normalized = normalizeRoleLocation(role ?? UserRole.EMPLOYEE, location.cityId, location.branchId, cities, branches);
     if (role) {
         const locationError = validateRoleLocation(role, normalized);
         if (locationError) throw new Error(locationError);
     }
+
+    const { data, error } = await supabase.rpc('update_staff_user_location', {
+        target_id: userId,
+        p_role: role ?? null,
+        p_city_id: normalized.cityId,
+        p_branch_id: normalized.branchId,
+    });
+    if (!error) {
+        if (data && data.success === false) {
+            throw new Error('Location update did not complete.');
+        }
+        return;
+    }
+    if (!staffRpcUnavailable(error)) {
+        throw new Error(error.message || 'Failed to update location');
+    }
+
     const payload: Record<string, unknown> = {
         city_id: normalized.cityId,
         branch_id: normalized.branchId,
         updated_at: new Date().toISOString(),
     };
     if (role) payload.role = role;
-    const { error } = await supabase.from('user_profiles').update(payload).eq('id', userId);
-    if (error) throw error;
+    const { error: updateError } = await supabase.from('user_profiles').update(payload).eq('id', userId);
+    if (updateError) throw updateError;
 };
 
 export const deleteAdminUser = async (userId: string) => {
     if (!supabase) throw new Error('Supabase not initialized');
+    if (!userId) throw new Error('User id is required');
 
-    // supabase.auth.admin.deleteUser() requires the service_role key which must
-    // never be exposed in the browser — with the anon key it always returns
-    // "User not allowed". Instead we remove the user from the user_profiles
-    // table (protected by RLS for admins) which effectively revokes their
-    // access from the app. The Supabase Auth account can be removed via the
-    // Supabase dashboard (Authentication → Users) if a hard-delete is needed.
-    const { error } = await supabase
-        .from('user_profiles')
-        .delete()
-        .eq('id', userId);
-    if (error) throw error;
+    const actor = await getActorProfile();
+    if (actor.id === userId) {
+        throw new Error('You cannot delete your own account.');
+    }
+
+    const { data, error } = await supabase.rpc('delete_staff_user', { target_id: userId });
+    if (error) {
+        const message = error.message || 'Failed to delete user';
+        if (staffRpcUnavailable(error)) {
+            throw new Error(
+                'Complete user deletion is not available until the database security update is applied. Run scripts/fix_user_management.sql in the Supabase SQL editor.'
+            );
+        }
+        if (/super admin/i.test(message)) {
+            throw new Error('Super Admin accounts cannot be deleted.');
+        }
+        if (/not authorized|not authenticated|42501|permission/i.test(message)) {
+            throw new Error('Not authorized to delete this user.');
+        }
+        throw new Error(message);
+    }
+
+    const result = data && typeof data === 'object' ? data : { success: Boolean(data) };
+    if (!result.success) {
+        throw new Error('User deletion did not complete. The account was not removed.');
+    }
+    return result;
 };
 
 export const updateAdminUserPassword = async (userId: string, password: string) => {

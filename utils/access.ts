@@ -93,6 +93,79 @@ export const creatableRoles = (actor: UserRole): UserRole[] => {
   return [];
 };
 
+export type StaffScope = {
+  id?: string | null;
+  role: UserRole;
+  cityId?: string | null;
+  branchId?: string | null;
+};
+
+export const canViewStaffUser = (actor: StaffScope, target: StaffScope) => {
+  if (target.id && actor.id && target.id === actor.id) return true;
+  const targetRole = normalizeUserRole(target.role);
+  if (actor.role === UserRole.SUPER_ADMIN) return true;
+  if (actor.role === UserRole.CITY_MANAGER) {
+    return Boolean(actor.cityId) && target.cityId === actor.cityId && targetRole !== UserRole.SUPER_ADMIN;
+  }
+  if (actor.role === UserRole.BRANCH_ADMIN) {
+    return targetRole === UserRole.EMPLOYEE && Boolean(actor.branchId) && target.branchId === actor.branchId;
+  }
+  return false;
+};
+
+export const canDeleteStaffUser = (actor: StaffScope, target: StaffScope) => {
+  if (!target.id || (actor.id && target.id === actor.id)) return false;
+  const targetRole = normalizeUserRole(target.role);
+  if (targetRole === UserRole.SUPER_ADMIN) return false;
+  if (actor.role === UserRole.SUPER_ADMIN) return true;
+  if (actor.role === UserRole.CITY_MANAGER) {
+    return Boolean(actor.cityId)
+      && target.cityId === actor.cityId
+      && (targetRole === UserRole.EMPLOYEE || targetRole === UserRole.BRANCH_ADMIN);
+  }
+  if (actor.role === UserRole.BRANCH_ADMIN) {
+    return targetRole === UserRole.EMPLOYEE && Boolean(actor.branchId) && target.branchId === actor.branchId;
+  }
+  return false;
+};
+
+export const canCreateStaffUser = (actor: StaffScope, target: StaffScope) => {
+  const targetRole = normalizeUserRole(target.role);
+  if (!creatableRoles(actor.role).includes(targetRole)) return false;
+  if (targetRole === UserRole.SUPER_ADMIN) return actor.role === UserRole.SUPER_ADMIN;
+  if (actor.role === UserRole.SUPER_ADMIN) return true;
+  if (actor.role === UserRole.CITY_MANAGER) {
+    return Boolean(actor.cityId) && target.cityId === actor.cityId;
+  }
+  if (actor.role === UserRole.BRANCH_ADMIN) {
+    return targetRole === UserRole.EMPLOYEE
+      && Boolean(actor.branchId)
+      && target.branchId === actor.branchId;
+  }
+  return false;
+};
+
+export const canAssignStaffLocation = (actor: StaffScope, target: StaffScope) => (
+  actor.role === UserRole.SUPER_ADMIN && normalizeUserRole(target.role) !== UserRole.SUPER_ADMIN
+);
+
+export const canChangeOwnRole = () => false;
+
+export const canAccessBranchData = (
+  actor: StaffScope,
+  branch: { id: string; cityId: string } | null | undefined,
+) => {
+  if (!branch?.id) return actor.role === UserRole.SUPER_ADMIN;
+  if (actor.role === UserRole.SUPER_ADMIN) return true;
+  if (actor.role === UserRole.CITY_MANAGER) {
+    return Boolean(actor.cityId) && branch.cityId === actor.cityId;
+  }
+  if (actor.role === UserRole.BRANCH_ADMIN || actor.role === UserRole.EMPLOYEE) {
+    return Boolean(actor.branchId) && branch.id === actor.branchId;
+  }
+  return false;
+};
+
 export const roleRequiresCity = (role: UserRole) => role !== UserRole.SUPER_ADMIN;
 export const roleRequiresBranch = (role: UserRole) => (
   role === UserRole.BRANCH_ADMIN || role === UserRole.EMPLOYEE

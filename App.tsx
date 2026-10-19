@@ -55,7 +55,6 @@ import {
   canSwitchWorkspaceBranch,
   defaultLandingView,
   normalizeUserRole,
-  scopeWorkspaceLocations,
 } from './utils/access';
 import { isUuid, resolveBranchId, resolveCityId } from './utils/locations';
 
@@ -273,6 +272,7 @@ const App: React.FC = () => {
   const [isLoggedIn, setIsLoggedIn] = useState(!!initialDemoProfile);
   const [isAuthLoading, setIsAuthLoading] = useState(!initialDemoProfile);
   const [userRole, setUserRole] = useState<UserRole | null>(initialDemoProfile?.role ?? null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(initialDemoProfile?.id ?? null);
   const [assignedCityId, setAssignedCityId] = useState<string | null>(initialDemoProfile?.cityId ?? null);
   const [assignedBranchId, setAssignedBranchId] = useState<string | null>(initialDemoProfile?.branchId ?? null);
   const [selectedCityId, setSelectedCityId] = useState<string | null>(
@@ -302,6 +302,7 @@ const App: React.FC = () => {
 
   const applyProfile = (profile: SessionProfile, options?: { skipLocation?: boolean }) => {
     setUserRole(profile.role);
+    setCurrentUserId(profile.id ?? null);
     setAssignedCityId(profile.cityId);
     setAssignedBranchId(profile.branchId);
     if (options?.skipLocation) return;
@@ -387,6 +388,14 @@ const App: React.FC = () => {
         setCurrentView(defaultLandingView(verifiedProfile.role));
       } catch (error) {
         console.error('Failed to restore session:', error);
+        if (supabase) {
+          await supabaseSignOut().catch(() => undefined);
+        }
+        if (isMounted) {
+          setIsLoggedIn(false);
+          setUserRole(null);
+          setCurrentUserId(null);
+        }
       } finally {
         if (isMounted) {
           setIsAuthLoading(false);
@@ -403,12 +412,28 @@ const App: React.FC = () => {
     }
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (
-        event === 'INITIAL_SESSION' ||
-        event === 'SIGNED_IN' ||
-        event === 'TOKEN_REFRESHED' ||
-        sessionStorage.getItem(DEMO_AUTH_STORAGE_KEY)
-      ) {
+      if (sessionStorage.getItem(DEMO_AUTH_STORAGE_KEY)) {
+        return;
+      }
+      if (event === 'INITIAL_SESSION' || event === 'SIGNED_IN') {
+        return;
+      }
+
+      if (event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+        if (!session?.user) return;
+        try {
+          await getSessionProfile(session.user);
+        } catch (error) {
+          console.error('Session is no longer authorized:', error);
+          await supabaseSignOut().catch(() => undefined);
+          if (!isMounted) return;
+          setIsLoggedIn(false);
+          setUserRole(null);
+          setCurrentUserId(null);
+          setAssignedCityId(null);
+          setAssignedBranchId(null);
+          clearAppDataCache();
+        }
         return;
       }
 
@@ -420,10 +445,16 @@ const App: React.FC = () => {
           setIsLoggedIn(true);
         } catch (error) {
           console.error('Failed to resolve user role:', error);
+          await supabaseSignOut().catch(() => undefined);
+          if (!isMounted) return;
+          setIsLoggedIn(false);
+          setUserRole(null);
+          setCurrentUserId(null);
         }
       } else if (isMounted) {
         setIsLoggedIn(false);
         setUserRole(null);
+        setCurrentUserId(null);
         setAssignedCityId(null);
         setAssignedBranchId(null);
         clearAppDataCache();
@@ -565,17 +596,8 @@ const App: React.FC = () => {
   }, [currentView, userRole, selectedBranchId]);
 
   const workspace = useMemo(
-    () => {
-      if (!userRole) return { cities: [] as City[], branches: [] as Branch[] };
-      return scopeWorkspaceLocations(
-        userRole,
-        cities,
-        branches,
-        assignedCityId,
-        assignedBranchId,
-      );
-    },
-    [assignedBranchId, assignedCityId, branches, cities, userRole]
+    () => ({ cities, branches }),
+    [branches, cities]
   );
 
   useEffect(() => {
@@ -592,20 +614,9 @@ const App: React.FC = () => {
   }, [assignedCityId, branches, selectedBranchId, selectedCityId, userRole]);
 
   const scopedSales = useMemo(() => {
-    const cityId = userRole === UserRole.CITY_MANAGER
-      ? (assignedCityId || selectedCityId)
-      : selectedCityId;
-    const cityBranchIds = (userRole === UserRole.CITY_MANAGER ? workspace.branches : branches)
-      .filter((branch) => !cityId || branch.cityId === cityId)
-      .map((branch) => branch.id);
-
-    return sales.filter((sale) => {
-      if (!sale.branchId) return isDemoSession || !selectedBranchId;
-      if (selectedBranchId) return sale.branchId === selectedBranchId;
-      if (cityId) return cityBranchIds.includes(sale.branchId);
-      return userRole !== UserRole.CITY_MANAGER;
-    });
-  }, [assignedCityId, branches, isDemoSession, sales, selectedBranchId, selectedCityId, userRole, workspace.branches]);
+    if (!selectedBranchId) return sales;
+    return sales.filter((sale) => !sale.branchId || sale.branchId === selectedBranchId);
+  }, [sales, selectedBranchId]);
 
   const selectedBranch = workspace.branches.find((branch) => branch.id === selectedBranchId)
     ?? branches.find((branch) => branch.id === selectedBranchId)
@@ -624,13 +635,8 @@ const App: React.FC = () => {
     : selectedCityId;
 
   const branchSummaries = useMemo(() => {
-    const scopedBranches = userRole === UserRole.CITY_MANAGER
-      ? workspace.branches
-      : dashboardCityId
-        ? branches.filter((branch) => branch.cityId === dashboardCityId)
-        : branches;
-    if (userRole !== UserRole.CITY_MANAGER && (selectedBranchId || scopedBranches.length <= 1)) return [];
-    if (userRole === UserRole.CITY_MANAGER && scopedBranches.length === 0) return [];
+    const scopedBranches = branches;
+    if (selectedBranchId || scopedBranches.length <= 1) return [];
     return scopedBranches.map((branch) => {
       const branchSales = sales.filter((sale) => sale.branchId === branch.id);
       return {
@@ -1106,6 +1112,7 @@ const App: React.FC = () => {
         clearAppDataCache();
         setIsLoggedIn(false);
         setUserRole(null);
+        setCurrentUserId(null);
         setAssignedCityId(null);
         setAssignedBranchId(null);
         setSelectedCityId(null);
@@ -1184,6 +1191,7 @@ const App: React.FC = () => {
         {currentView === ViewState.USERS && userRole && canManageUsers(userRole) && (
           <Users
             actorRole={userRole}
+            actorUserId={currentUserId}
             assignedCityId={assignedCityId}
             assignedBranchId={assignedBranchId}
             cities={workspace.cities}

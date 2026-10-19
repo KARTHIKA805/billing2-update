@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "npx --yes tsx scripts/test-user-management.ts",
+    "test:user-management": "npx --yes tsx scripts/test-user-management.ts",
+    "test:user-deletion-live": "node scripts/test-user-deletion-live.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.30.0",
