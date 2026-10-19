@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Search, UserPlus, Trash2, Eye, EyeOff, X, AlertCircle, Check, Info, Shield, User, Pencil } from 'lucide-react';
 import { getAdminUsers, createAdminUser, deleteAdminUser, updateAdminUserLocation } from '../services/supabaseService';
 import { Branch, City, UserRole } from '../types';
-import { ROLE_LABELS, creatableRoles, getRoleDescription, normalizeRoleLocation, normalizeUserRole, roleRequiresBranch, roleRequiresCity, validateRoleLocation } from '../utils/access';
+import { ROLE_LABELS, canAssignStaffLocation, canCreateStaffUser, canDeleteStaffUser, creatableRoles, getRoleDescription, normalizeRoleLocation, normalizeUserRole, roleRequiresBranch, roleRequiresCity, validateRoleLocation } from '../utils/access';
 import { resolveCityId, resolveBranchId } from '../utils/locations';
 
 interface AdminUser {
@@ -17,6 +17,7 @@ interface AdminUser {
 
 interface UsersProps {
   actorRole: UserRole;
+  actorUserId?: string | null;
   assignedCityId?: string | null;
   assignedBranchId?: string | null;
   cities: City[];
@@ -32,6 +33,7 @@ const formatUserDateTime = (value?: string | null) => {
 
 const Users: React.FC<UsersProps> = ({
   actorRole,
+  actorUserId,
   assignedCityId,
   assignedBranchId,
   cities,
@@ -50,6 +52,12 @@ const Users: React.FC<UsersProps> = ({
   const [editLocation, setEditLocation] = useState({ cityId: '', branchId: '' });
 
   // Form state
+  const actor = {
+    id: actorUserId || '',
+    role: actorRole,
+    cityId: assignedCityId,
+    branchId: assignedBranchId,
+  };
   const allowedRoles = creatableRoles(actorRole);
   const [newUser, setNewUser] = useState({
     email: '',
@@ -85,9 +93,9 @@ const Users: React.FC<UsersProps> = ({
         last_sign_in_at: user.last_sign_in_at ?? null,
       })));
     } catch (err: any) {
-      // This error is expected if using client-side auth
-      console.warn('Note: User management requires admin access. For full functionality, use the admin console.');
+      console.warn('Failed to load users:', err);
       setUsers([]);
+      setError(err?.message || 'Failed to load users.');
     } finally {
       setLoading(false);
     }
@@ -120,6 +128,10 @@ const Users: React.FC<UsersProps> = ({
     const locationError = validateRoleLocation(nextRole, location);
     if (locationError) {
       setError(locationError);
+      return;
+    }
+    if (!canCreateStaffUser(actor, { role: nextRole, cityId: location.cityId, branchId: location.branchId })) {
+      setError('Not authorized to create this user.');
       return;
     }
 
@@ -172,25 +184,29 @@ const Users: React.FC<UsersProps> = ({
   };
 
   const handleDeleteUser = async (userId: string) => {
+    const target = users.find((user) => user.id === userId);
+    if (!target || !canDeleteStaffUser(actor, {
+      id: target.id,
+      role: normalizeUserRole(target.role),
+      cityId: target.cityId,
+      branchId: target.branchId,
+    })) {
+      setError('Not authorized to delete this user.');
+      setDeleteConfirm(null);
+      return;
+    }
+
     setLoading(true);
     setError('');
     setSuccess('');
     setWarning('');
     try {
       await deleteAdminUser(userId);
-      setSuccess('User deleted successfully!');
+      setSuccess('User deleted and login access revoked.');
       setDeleteConfirm(null);
       await loadUsers();
     } catch (err: any) {
-      const errorMsg = err.message || 'Failed to delete user';
-      if (/not allowed|permission|policy|rls/i.test(errorMsg)) {
-        setError(
-          'Permission denied: your Supabase RLS policy does not allow deleting from user_profiles. ' +
-          'Run the fix_rls_policies.sql script in your Supabase SQL editor to grant admin delete access.'
-        );
-      } else {
-        setError(errorMsg);
-      }
+      setError(err?.message || 'Failed to delete user');
     } finally {
       setLoading(false);
     }
@@ -249,16 +265,9 @@ const Users: React.FC<UsersProps> = ({
     return cityId && branch.cityId === cityId;
   });
 
-  const filteredUsers = users.filter((user) => {
-    if (!user.email.toLowerCase().includes(searchTerm.toLowerCase())) return false;
-    if (actorRole === UserRole.CITY_MANAGER && assignedCityId) {
-      return user.cityId === assignedCityId;
-    }
-    if (actorRole === UserRole.BRANCH_ADMIN && assignedBranchId) {
-      return !user.branchId || user.branchId === assignedBranchId;
-    }
-    return true;
-  });
+  const filteredUsers = users.filter((user) =>
+    user.email.toLowerCase().includes(searchTerm.toLowerCase())
+  );
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -288,13 +297,15 @@ const Users: React.FC<UsersProps> = ({
           />
         </div>
 
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="flex items-center gap-2 px-4 py-2.5 bg-[var(--brand-dark)] text-[var(--brand-text-light)] rounded-xl hover:bg-[var(--brand-bg)] font-medium transition-colors shadow-md shadow-[var(--brand-border)] whitespace-nowrap"
-        >
-          <UserPlus size={20} />
-          Add User
-        </button>
+        {allowedRoles.length > 0 && (
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="flex items-center gap-2 px-4 py-2.5 bg-[var(--brand-dark)] text-[var(--brand-text-light)] rounded-xl hover:bg-[var(--brand-bg)] font-medium transition-colors shadow-md shadow-[var(--brand-border)] whitespace-nowrap"
+          >
+            <UserPlus size={20} />
+            Add User
+          </button>
+        )}
       </div>
 
       {/* Alert Messages */}
@@ -383,26 +394,35 @@ const Users: React.FC<UsersProps> = ({
                     </td>
                     <td className="px-6 py-4 text-right">
                       {deleteConfirm === user.id ? (
-                        <div className="flex items-center justify-end gap-2">
-                          <p className="text-sm text-[var(--brand-border)] mr-3">Delete user?</p>
-                          <button
-                            onClick={() => handleDeleteUser(user.id)}
-                            disabled={loading}
-                            className="px-3 py-1 bg-[var(--brand-dark)] text-[var(--brand-text-light)] rounded-lg text-sm hover:bg-[var(--brand-bg)] disabled:opacity-50"
-                          >
-                            Confirm
-                          </button>
-                          <button
-                            onClick={() => setDeleteConfirm(null)}
-                            disabled={loading}
-                            className="px-3 py-1 bg-[var(--brand-muted)] text-[var(--brand-dark)] rounded-lg text-sm hover:bg-[var(--brand-surface)] disabled:opacity-50"
-                          >
-                            Cancel
-                          </button>
+                        <div className="flex flex-col items-end gap-2">
+                          <p className="text-sm text-[var(--brand-border)] text-right max-w-xs">
+                            Permanently delete {user.email}? Login, sessions, and tokens will be revoked. Bills stay in history.
+                          </p>
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              onClick={() => handleDeleteUser(user.id)}
+                              disabled={loading}
+                              className="px-3 py-1 bg-[var(--brand-dark)] text-[var(--brand-text-light)] rounded-lg text-sm hover:bg-[var(--brand-bg)] disabled:opacity-50"
+                            >
+                              {loading ? 'Deleting...' : 'Confirm'}
+                            </button>
+                            <button
+                              onClick={() => setDeleteConfirm(null)}
+                              disabled={loading}
+                              className="px-3 py-1 bg-[var(--brand-muted)] text-[var(--brand-dark)] rounded-lg text-sm hover:bg-[var(--brand-surface)] disabled:opacity-50"
+                            >
+                              Cancel
+                            </button>
+                          </div>
                         </div>
                       ) : (
                         <div className="flex items-center justify-end gap-1">
-                          {actorRole === UserRole.SUPER_ADMIN && normalizeUserRole(user.role) !== UserRole.SUPER_ADMIN && (
+                          {canAssignStaffLocation(actor, {
+                            id: user.id,
+                            role: normalizeUserRole(user.role),
+                            cityId: user.cityId,
+                            branchId: user.branchId,
+                          }) && (
                             <button
                               onClick={() => {
                                 setError('');
@@ -418,12 +438,20 @@ const Users: React.FC<UsersProps> = ({
                               <Pencil size={18} />
                             </button>
                           )}
-                          <button
-                            onClick={() => setDeleteConfirm(user.id)}
-                            className="p-2 text-[var(--brand-dark)] hover:bg-[var(--brand-muted)] rounded-lg transition-colors"
-                          >
-                            <Trash2 size={18} />
-                          </button>
+                          {canDeleteStaffUser(actor, {
+                            id: user.id,
+                            role: normalizeUserRole(user.role),
+                            cityId: user.cityId,
+                            branchId: user.branchId,
+                          }) && (
+                            <button
+                              onClick={() => setDeleteConfirm(user.id)}
+                              className="p-2 text-[var(--brand-dark)] hover:bg-[var(--brand-muted)] rounded-lg transition-colors"
+                              title="Delete user"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          )}
                         </div>
                       )}
                     </td>

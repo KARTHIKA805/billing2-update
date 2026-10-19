@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { MapPin, Building2, Loader2 } from 'lucide-react';
 import { Branch, City, UserRole } from '../types';
-import { ROLE_LABELS, canSwitchLocation } from '../utils/access';
+import { ROLE_LABELS, canChooseBillingBranch, canSwitchLocation } from '../utils/access';
 
 interface LocationPickerProps {
   role: UserRole;
@@ -41,7 +41,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
 }) => {
   const lockedCityId = role === UserRole.SUPER_ADMIN ? null : (assignedCityId ?? null);
   const canChooseCity = role === UserRole.SUPER_ADMIN;
-  const canChooseBranch = canSwitchLocation(role);
+  const canChooseBranch = canSwitchLocation(role) || (requireBranch && canChooseBillingBranch(role));
   const showAll = allowAll && !requireBranch;
 
   const visibleCities = useMemo(() => {

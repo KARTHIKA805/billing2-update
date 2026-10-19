@@ -40,8 +40,9 @@ export const canManageLocations = (role: UserRole) => role === UserRole.SUPER_AD
 export const canEditBills = (role: UserRole) => isAtLeast(role, UserRole.BRANCH_ADMIN);
 export const canSwitchLocation = (role: UserRole) => role === UserRole.SUPER_ADMIN;
 export const canSwitchWorkspaceBranch = (role: UserRole) => role === UserRole.CITY_MANAGER;
-export const canAccessBilling = (role: UserRole) =>
-  role === UserRole.EMPLOYEE || role === UserRole.BRANCH_ADMIN;
+export const canAccessBilling = (_role: UserRole) => true;
+export const canChooseBillingBranch = (role: UserRole) =>
+  role === UserRole.SUPER_ADMIN || role === UserRole.CITY_MANAGER;
 
 export const scopeWorkspaceLocations = <
   C extends { id: string },
@@ -91,6 +92,79 @@ export const creatableRoles = (actor: UserRole): UserRole[] => {
   if (actor === UserRole.CITY_MANAGER) return [UserRole.EMPLOYEE, UserRole.BRANCH_ADMIN];
   if (actor === UserRole.BRANCH_ADMIN) return [UserRole.EMPLOYEE];
   return [];
+};
+
+export type StaffScope = {
+  id?: string | null;
+  role: UserRole;
+  cityId?: string | null;
+  branchId?: string | null;
+};
+
+export const canViewStaffUser = (actor: StaffScope, target: StaffScope) => {
+  if (target.id && actor.id && target.id === actor.id) return true;
+  const targetRole = normalizeUserRole(target.role);
+  if (actor.role === UserRole.SUPER_ADMIN) return true;
+  if (actor.role === UserRole.CITY_MANAGER) {
+    return Boolean(actor.cityId) && target.cityId === actor.cityId && targetRole !== UserRole.SUPER_ADMIN;
+  }
+  if (actor.role === UserRole.BRANCH_ADMIN) {
+    return targetRole === UserRole.EMPLOYEE && Boolean(actor.branchId) && target.branchId === actor.branchId;
+  }
+  return false;
+};
+
+export const canDeleteStaffUser = (actor: StaffScope, target: StaffScope) => {
+  if (!target.id || (actor.id && target.id === actor.id)) return false;
+  const targetRole = normalizeUserRole(target.role);
+  if (targetRole === UserRole.SUPER_ADMIN) return false;
+  if (actor.role === UserRole.SUPER_ADMIN) return true;
+  if (actor.role === UserRole.CITY_MANAGER) {
+    return Boolean(actor.cityId)
+      && target.cityId === actor.cityId
+      && (targetRole === UserRole.EMPLOYEE || targetRole === UserRole.BRANCH_ADMIN);
+  }
+  if (actor.role === UserRole.BRANCH_ADMIN) {
+    return targetRole === UserRole.EMPLOYEE && Boolean(actor.branchId) && target.branchId === actor.branchId;
+  }
+  return false;
+};
+
+export const canCreateStaffUser = (actor: StaffScope, target: StaffScope) => {
+  const targetRole = normalizeUserRole(target.role);
+  if (!creatableRoles(actor.role).includes(targetRole)) return false;
+  if (targetRole === UserRole.SUPER_ADMIN) return actor.role === UserRole.SUPER_ADMIN;
+  if (actor.role === UserRole.SUPER_ADMIN) return true;
+  if (actor.role === UserRole.CITY_MANAGER) {
+    return Boolean(actor.cityId) && target.cityId === actor.cityId;
+  }
+  if (actor.role === UserRole.BRANCH_ADMIN) {
+    return targetRole === UserRole.EMPLOYEE
+      && Boolean(actor.branchId)
+      && target.branchId === actor.branchId;
+  }
+  return false;
+};
+
+export const canAssignStaffLocation = (actor: StaffScope, target: StaffScope) => (
+  actor.role === UserRole.SUPER_ADMIN && normalizeUserRole(target.role) !== UserRole.SUPER_ADMIN
+);
+
+export const canChangeOwnRole = () => false;
+
+export const canAccessBranchData = (
+  actor: StaffScope,
+  branch: { id: string; cityId: string } | null | undefined,
+) => {
+  if (!branch?.id) return actor.role === UserRole.SUPER_ADMIN;
+  if (actor.role === UserRole.SUPER_ADMIN) return true;
+  if (actor.role === UserRole.CITY_MANAGER) {
+    return Boolean(actor.cityId) && branch.cityId === actor.cityId;
+  }
+  if (actor.role === UserRole.BRANCH_ADMIN || actor.role === UserRole.EMPLOYEE) {
+    return Boolean(actor.branchId) && branch.id === actor.branchId;
+  }
+  return false;
 };
 
 export const roleRequiresCity = (role: UserRole) => role !== UserRole.SUPER_ADMIN;
@@ -143,10 +217,10 @@ export const validateRoleLocation = (
 
 export const getRoleDescription = (role: UserRole) => {
   if (role === UserRole.SUPER_ADMIN) {
-    return 'All cities and branches: dashboards, users, locations, and categories. No billing.';
+    return 'All cities and branches: dashboards, billing, users, locations, and categories.';
   }
   if (role === UserRole.CITY_MANAGER) {
-    return 'One city only: that city’s branches on the dashboard and throughout the workspace. No billing.';
+    return 'One city only: that city’s branches, dashboard, and billing.';
   }
   if (role === UserRole.BRANCH_ADMIN) {
     return 'One branch: full dashboard, billing, inventory edits, and employee accounts.';
