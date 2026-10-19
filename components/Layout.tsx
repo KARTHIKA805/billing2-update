@@ -25,6 +25,7 @@ interface LayoutProps {
     onLogout: () => void;
     children: React.ReactNode;
     notifications: { id: string, message: string }[];
+    onNotificationsSeen?: (ids: string[]) => void;
     userRole: UserRole;
     fillViewport?: boolean;
     locationLabel?: string;
@@ -42,6 +43,7 @@ const Layout: React.FC<LayoutProps> = ({
     onLogout,
     children,
     notifications,
+    onNotificationsSeen,
     userRole,
     fillViewport = false,
     locationLabel,
@@ -66,6 +68,16 @@ const Layout: React.FC<LayoutProps> = ({
         const stored = localStorage.getItem('suvai-sidebar-collapsed');
         if (stored === 'true') setIsSidebarCollapsed(true);
     }, []);
+
+    useEffect(() => {
+        if (!showNotifications || notifications.length === 0) return;
+        const ids = notifications.map((item) => item.id);
+        const timer = window.setTimeout(() => {
+            onNotificationsSeen?.(ids);
+            setShowNotifications(false);
+        }, 2000);
+        return () => window.clearTimeout(timer);
+    }, [showNotifications]);
 
     useLayoutEffect(() => {
         document.body.classList.toggle('mobile-menu-open', isMobileMenuOpen);
@@ -343,7 +355,15 @@ const Layout: React.FC<LayoutProps> = ({
                         <div className="relative">
                             <button
                                 type="button"
-                                onClick={() => setShowNotifications(!showNotifications)}
+                                onClick={() => {
+                                    setShowNotifications((open) => {
+                                        if (open) {
+                                            onNotificationsSeen?.(notifications.map((item) => item.id));
+                                            return false;
+                                        }
+                                        return true;
+                                    });
+                                }}
                                 className="mobile-menu-button text-[var(--brand-border)] hover:text-[var(--brand-dark)] hover:bg-[var(--brand-muted)] relative"
                                 aria-label="Notifications"
                             >

@@ -83,3 +83,28 @@ end;
 $$;
 
 grant execute on function public.get_admin_users() to authenticated;
+
+create or replace function public.can_bill_branch(target_branch uuid)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  actor public.user_profiles%rowtype;
+  actor_role text;
+begin
+  if target_branch is null or not public.can_read_branch(target_branch) then
+    return false;
+  end if;
+  select * into actor from public.user_profiles where id = auth.uid();
+  if actor.id is null then
+    return false;
+  end if;
+  actor_role := public.normalize_app_role(actor.role);
+  return actor_role in ('super_admin', 'city_manager', 'branch_admin', 'employee');
+end;
+$$;
+
+grant execute on function public.can_bill_branch(uuid) to authenticated;

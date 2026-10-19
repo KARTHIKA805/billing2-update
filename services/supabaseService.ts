@@ -296,7 +296,7 @@ const assertBranchAccess = async (branchId: string | null | undefined, mode: 're
     if (!canAccessBranchData(actor, branch)) {
         throw new Error('Not authorized for this branch.');
     }
-    if (mode === 'bill' && (!canAccessBilling(actor.role) || actor.branchId !== branchId)) {
+    if (mode === 'bill' && !canAccessBilling(actor.role)) {
         throw new Error('Not authorized to bill at this branch.');
     }
     if (mode === 'edit' && !canEditBills(actor.role)) {

@@ -47,6 +47,7 @@ import { updateCategory, deleteCategory } from './services/supabaseService';
 import { clearAppDataCache, loadAppDataCache, saveAppDataCache } from './utils/dataCache';
 import {
   canAccessBilling,
+  canChooseBillingBranch,
   canEditCategories,
   canEditInventory,
   canManageLocations,
@@ -335,6 +336,7 @@ const App: React.FC = () => {
 
   // Dynamic stats derived from interactions
   const [notifications, setNotifications] = useState<{id: string, message: string}[]>([]);
+  const dismissedNotificationIds = useRef(new Set<string>());
 
   const applyCachedData = (cached: ReturnType<typeof readCachedAppData>) => {
     if (!cached?.products?.length) return false;
@@ -582,7 +584,7 @@ const App: React.FC = () => {
     if (currentView === ViewState.BILLING && !canAccessBilling(userRole)) {
       setCurrentView(defaultLandingView(userRole));
     }
-    if (currentView === ViewState.BILLING && !selectedBranchId && canAccessBilling(userRole) && canSwitchLocation(userRole)) {
+    if (currentView === ViewState.BILLING && !selectedBranchId && canAccessBilling(userRole) && canChooseBillingBranch(userRole)) {
       const cityId = assignedCityId || selectedCityId;
       const cityBranches = cityId ? branches.filter((branch) => branch.cityId === cityId) : [];
       if (cityBranches.length === 1) {
@@ -673,16 +675,24 @@ const App: React.FC = () => {
   }, [scopedSales]);
 
   useEffect(() => {
-    // Calculate notifications based on low stock
     const lowStockProducts = products.filter(p => p.stock <= p.minStock);
     const lowStockIngredients = ingredients.filter(i => i.currentStock <= i.minStock);
-    
+
     const notifs = [
       ...lowStockProducts.map(p => ({ id: `p-${p.id}`, message: `Product ${p.name} is low on stock (${p.stock} left)` })),
       ...lowStockIngredients.map(i => ({ id: `i-${i.id}`, message: `Ingredient ${i.name} is low on stock (${i.currentStock} left)` }))
     ];
-    setNotifications(notifs);
+    const activeIds = new Set(notifs.map((item) => item.id));
+    dismissedNotificationIds.current.forEach((id) => {
+      if (!activeIds.has(id)) dismissedNotificationIds.current.delete(id);
+    });
+    setNotifications(notifs.filter((item) => !dismissedNotificationIds.current.has(item.id)));
   }, [products, ingredients]);
+
+  const dismissNotifications = (ids: string[]) => {
+    ids.forEach((id) => dismissedNotificationIds.current.add(id));
+    setNotifications((current) => current.filter((item) => !dismissedNotificationIds.current.has(item.id)));
+  };
 
   const applySaleResultsLocally = (createdSales: SaleRecord[]) => {
     if (createdSales.length === 0) return;
@@ -744,7 +754,7 @@ const App: React.FC = () => {
   const handleCompleteSales = async (salesPayload: Omit<SaleRecord, 'id' | 'timestamp'>[]): Promise<SaleRecord[]> => {
     const branchId = resolveBranchId(selectedBranchId, branches);
     if (!branchId || !isUuid(branchId)) {
-      if (userRole && canSwitchLocation(userRole)) {
+      if (userRole && canChooseBillingBranch(userRole)) {
         setShowLocationPicker(true);
       }
       throw new Error('Select a branch before creating a bill.');
@@ -1078,7 +1088,7 @@ const App: React.FC = () => {
     return <Login onLogin={handleLogin} />;
   }
 
-  if (showLocationPicker && userRole && canSwitchLocation(userRole)) {
+  if (showLocationPicker && userRole && (canSwitchLocation(userRole) || (requireBillingBranch && canChooseBillingBranch(userRole)))) {
     return (
       <LocationPicker
         role={userRole}
@@ -1124,6 +1134,7 @@ const App: React.FC = () => {
         }
       }}
       notifications={notifications}
+      onNotificationsSeen={dismissNotifications}
       userRole={userRole ?? UserRole.SUPER_ADMIN}
       locationLabel={locationLabel}
       cities={workspace.cities}
